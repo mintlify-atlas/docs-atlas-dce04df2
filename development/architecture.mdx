@@ -88,10 +88,10 @@ Every 50ms, the server:
 
 ### Chunk-Based World Streaming
 
-The world is divided into 64×64 tile chunks. Clients request chunks as the player moves:
+The world is divided into 32×32 tile chunks. Clients request chunks as the player moves:
 
 ```rust
-const CHUNK_SIZE: i32 = 64;
+pub const CHUNK_SIZE: u32 = 32;  // 32x32 tiles per chunk
 ```
 
 **Chunk lifecycle:**

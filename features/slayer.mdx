@@ -1,0 +1,923 @@
+---
+title: Slayer System
+description: Complete guide to the slayer skill, task assignments, slayer masters, rewards, and progression
+---
+
+The Slayer system allows players to receive combat assignments from Slayer Masters, earn slayer experience and points, and unlock unique rewards and blocked monster lists.
+
+## Overview
+
+The slayer skill provides structured PvM progression through task-based gameplay. Players interact with Slayer Masters to receive assignments, complete kills to earn XP and points, and spend points on unlocks, blocks, and equipment.
+
+## Core Components
+
+### Slayer Masters
+
+Slayer Masters are NPCs that assign tasks to players. Each master has different requirements and reward structures.
+
+<CodeGroup>
+```rust Definition
+pub struct SlayerMasterDef {
+    pub id: String,
+    pub display_name: String,
+    pub entity_prototype: String,
+    pub combat_level_required: i32,
+    pub slayer_level_required: i32,
+    pub points_per_task: i32,
+    pub tasks: Vec<SlayerTaskDef>,
+}
+```
+
+```toml Example: Turael
+[[masters]]
+id = "turael"
+display_name = "Turael"
+entity_prototype = "slayer_master_turael"
+combat_level_required = 0
+slayer_level_required = 1
+points_per_task = 2
+
+[[masters.tasks]]
+monster_id = "pig"
+display_name = "Pigs"
+count_min = 15
+count_max = 35
+weight = 10
+xp_per_kill = 10
+```
+
+```toml Example: Mazchna
+[[masters]]
+id = "mazchna"
+display_name = "Mazchna"
+entity_prototype = "slayer_master_mazchna"
+combat_level_required = 35
+slayer_level_required = 20
+points_per_task = 5
+
+[[masters.tasks]]
+monster_id = "wild_boar"
+display_name = "Wild Boars"
+count_min = 30
+count_max = 55
+weight = 10
+xp_per_kill = 25
+```
+
+```toml Example: Chaeldar
+[[masters]]
+id = "chaeldar"
+display_name = "Chaeldar"
+entity_prototype = "slayer_master_chaeldar"
+combat_level_required = 40
+slayer_level_required = 60
+points_per_task = 10
+
+[[masters.tasks]]
+monster_id = "spider"
+display_name = "Spiders"
+count_min = 45
+count_max = 75
+weight = 10
+xp_per_kill = 45
+```
+</CodeGroup>
+
+#### Master Requirements
+
+Players must meet both combat level and slayer level requirements to receive tasks:
+
+```rust src/game/slayer.rs:171-218
+let combat_level = {
+    let players = self.players.read().await;
+    players
+        .get(player_id)
+        .map(|player| player.skills.combat_level())
+        .unwrap_or(0)
+};
+if combat_level < master.combat_level_required {
+    self.send_to_player(
+        player_id,
+        slayer_result(
+            false,
+            "get_task",
+            format!(
+                "You need combat level {} to get tasks from {}.",
+                master.combat_level_required, master.display_name
+            ),
+            None,
+            None,
+        ),
+    )
+    .await;
+    return;
+}
+
+let slayer_level = {
+    let players = self.players.read().await;
+    players
+        .get(player_id)
+        .map(|player| player.skills.slayer.level)
+        .unwrap_or(1)
+};
+if slayer_level < master.slayer_level_required {
+    self.send_to_player(
+        player_id,
+        slayer_result(
+            false,
+            "get_task",
+            format!(
+                "You need slayer level {} to get tasks from {}.",
+                master.slayer_level_required, master.display_name
+            ),
+            None,
+            None,
+        ),
+    )
+    .await;
+    return;
+}
+```
+
+### Slayer Tasks
+
+Tasks define which monsters players must kill and how many kills are required.
+
+<CodeGroup>
+```rust Task Definition
+pub struct SlayerTaskDef {
+    pub monster_id: String,
+    pub display_name: String,
+    pub count_min: i32,
+    pub count_max: i32,
+    pub weight: i32,
+    pub slayer_level_required: i32,
+    pub requires_unlock: bool,
+    pub xp_per_kill: i64,
+}
+```
+
+```rust Active Task State
+pub struct SlayerTask {
+    pub monster_id: String,
+    pub display_name: String,
+    pub kills_required: i32,
+    pub kills_current: i32,
+    pub xp_per_kill: i64,
+    pub master_id: String,
+    pub points_on_complete: i32,
+}
+```
+</CodeGroup>
+
+#### Task Assignment Algorithm
+
+Tasks are assigned using weighted random selection that respects player unlocks, blocks, and level requirements:
+
+```rust src/slayer/registry.rs:87-140
+pub fn assign_task(
+    &self,
+    master_id: &str,
+    player_slayer_level: i32,
+    player_state: &PlayerSlayerState,
+) -> Option<super::state::SlayerTask> {
+    let master = self.masters.get(master_id)?;
+
+    let eligible: Vec<&SlayerTaskDef> = master
+        .tasks
+        .iter()
+        .filter(|t| {
+            if t.slayer_level_required > player_slayer_level {
+                return false;
+            }
+            if player_state.blocked_monsters.contains(&t.monster_id) {
+                return false;
+            }
+            if t.requires_unlock && !player_state.unlocked_monsters.contains(&t.monster_id) {
+                return false;
+            }
+            true
+        })
+        .collect();
+
+    if eligible.is_empty() {
+        return None;
+    }
+
+    let total_weight: i32 = eligible.iter().map(|t| t.weight).sum();
+    let mut rng = rand::thread_rng();
+    let mut roll = rng.gen_range(0..total_weight);
+
+    let mut chosen = eligible[0];
+    for task in &eligible {
+        roll -= task.weight;
+        if roll < 0 {
+            chosen = task;
+            break;
+        }
+    }
+
+    let kill_count = rng.gen_range(chosen.count_min..=chosen.count_max);
+
+    Some(super::state::SlayerTask {
+        monster_id: chosen.monster_id.clone(),
+        display_name: chosen.display_name.clone(),
+        kills_required: kill_count,
+        kills_current: 0,
+        xp_per_kill: chosen.xp_per_kill,
+        master_id: master_id.to_string(),
+        points_on_complete: master.points_per_task,
+    })
+}
+```
+
+<Note>
+Tasks are filtered to exclude:
+- Tasks with slayer level requirements higher than the player's level
+- Monsters the player has blocked
+- Monsters that require unlock and haven't been unlocked
+</Note>
+
+### Player Slayer State
+
+The player's slayer state tracks their current task, points, and preferences:
+
+```rust src/slayer/state.rs:14-21
+pub struct PlayerSlayerState {
+    pub current_task: Option<SlayerTask>,
+    pub points: i32,
+    pub tasks_completed: i32,
+    pub blocked_monsters: Vec<String>,
+    pub unlocked_monsters: Vec<String>,
+}
+```
+
+<AccordionGroup>
+<Accordion title="current_task">
+The active slayer task, or `None` if the player has no task
+</Accordion>
+
+<Accordion title="points">
+Slayer points earned from completing tasks, used to purchase rewards
+</Accordion>
+
+<Accordion title="tasks_completed">
+Total number of tasks completed (for tracking progression)
+</Accordion>
+
+<Accordion title="blocked_monsters">
+List of monster IDs the player has blocked from being assigned
+</Accordion>
+
+<Accordion title="unlocked_monsters">
+List of monster IDs the player has unlocked for task assignment
+</Accordion>
+</AccordionGroup>
+
+## Task Tracking and Completion
+
+### Kill Tracking
+
+When a player kills a monster, the system checks if it matches their active task:
+
+```rust src/game/slayer.rs:335-341
+pub async fn process_slayer_kill(&self, player_id: &str, prototype_id: &str) {
+    let mut state = self.get_player_slayer_state(player_id).await;
+    let task = match &mut state.current_task {
+        Some(task) if task_matches_kill(&task.monster_id, prototype_id) => task,
+        _ => return,
+    };
+
+    task.kills_current += 1;
+```
+
+#### Monster ID Matching
+
+The system supports both exact matches and variant matches for monster IDs:
+
+```rust src/game/slayer.rs:52-54
+fn task_matches_kill(task_monster_id: &str, prototype_id: &str) -> bool {
+    task_monster_id == prototype_id || prototype_id.starts_with(&format!("{}_", task_monster_id))
+}
+```
+
+<Info>
+This allows tasks assigned for "goblin" to be completed by killing any variant like "goblin_champion" or "goblin_warrior"
+</Info>
+
+### Experience Rewards
+
+Each kill grants slayer XP based on the task definition:
+
+```rust src/game/slayer.rs:349-377
+let xp_result = {
+    let mut players = self.players.write().await;
+    players.get_mut(player_id).map(|player| {
+        let leveled_up = player.skills.slayer.add_xp(xp_per_kill);
+        (
+            player.skills.slayer.xp,
+            player.skills.slayer.level,
+            leveled_up,
+        )
+    })
+};
+
+if let Some((total_xp, level, leveled_up)) = xp_result {
+    self.send_to_player(
+        player_id,
+        ServerMessage::SkillXp {
+            player_id: player_id.to_string(),
+            skill: "slayer".to_string(),
+            xp_gained: xp_per_kill,
+            total_xp,
+            level,
+        },
+    )
+    .await;
+
+    if leveled_up {
+        self.broadcast_skill_level_up(player_id, "slayer", level).await;
+    }
+}
+```
+
+### Task Completion
+
+When the required kills are reached, the player earns slayer points:
+
+```rust src/game/slayer.rs:379-403
+if kills_current >= kills_required {
+    let points_awarded = task.points_on_complete;
+    state.points += points_awarded;
+    state.tasks_completed += 1;
+    state.current_task = None;
+    self.set_player_slayer_state(player_id, state.clone()).await;
+
+    self.send_to_player(
+        player_id,
+        ServerMessage::SlayerTaskComplete {
+            monster_id,
+            display_name,
+            points_awarded,
+            total_points: state.points,
+        },
+    )
+    .await;
+
+    tracing::info!(
+        "Player {} completed slayer task, earned {} points (total: {})",
+        player_id,
+        points_awarded,
+        state.points
+    );
+}
+```
+
+## Slayer Points and Rewards
+
+### Earning Points
+
+Points are earned by completing tasks. Different masters award different point amounts:
+
+| Master | Points per Task |
+|--------|----------------|
+| Turael | 2 |
+| Mazchna | 5 |
+| Chaeldar | 10 |
+
+### Reward System
+
+Rewards can be purchased using slayer points:
+
+```rust src/slayer/definition.rs:44-59
+pub struct SlayerRewardDef {
+    pub id: String,
+    pub display_name: String,
+    pub description: String,
+    pub cost: i32,
+    pub category: String,
+    pub target_id: Option<String>,
+    pub quantity: i32,
+}
+```
+
+#### Reward Categories
+
+<Tabs>
+<Tab title="Unlock">
+Unlock new monster types for task assignment:
+
+```toml data/slayer/rewards.toml
+[[rewards]]
+id = "unlock_rock_golem"
+display_name = "Unlock: Rock Golems"
+description = "Unlock Rock Golems as a slayer task"
+cost = 100
+category = "unlock"
+target_id = "rock_golem"
+```
+
+```rust src/game/slayer.rs:66-77
+"unlock" => match reward.target_id.as_deref() {
+    Some(target)
+        if state
+            .unlocked_monsters
+            .iter()
+            .any(|monster| monster == target) =>
+    {
+        Err("Already unlocked.".to_string())
+    }
+    Some(target) => Ok(RewardPurchasePlan::UnlockMonster(target.to_string())),
+    None => Ok(RewardPurchasePlan::NoEffect),
+},
+```
+</Tab>
+
+<Tab title="Block">
+Block monsters from being assigned as tasks:
+
+```toml data/slayer/rewards.toml
+[[rewards]]
+id = "block_slot"
+display_name = "Block Monster"
+description = "Block a monster from being assigned as a task"
+cost = 50
+category = "block"
+```
+
+```rust src/game/slayer.rs:78-91
+"block" => {
+    let monster = target_monster_id.unwrap_or_default();
+    if monster.is_empty() {
+        Err("Select a monster to block.".to_string())
+    } else if state
+        .blocked_monsters
+        .iter()
+        .any(|blocked| blocked == monster)
+    {
+        Err("Already blocked.".to_string())
+    } else {
+        Ok(RewardPurchasePlan::BlockMonster(monster.to_string()))
+    }
+}
+```
+</Tab>
+
+<Tab title="Equipment">
+Purchase slayer equipment:
+
+```toml data/slayer/rewards.toml
+[[rewards]]
+id = "slayer_helmet"
+display_name = "Slayer Helmet"
+description = "A helmet that boosts damage by 15% against your slayer task."
+cost = 100
+category = "equipment"
+target_id = "slayer_helmet"
+quantity = 1
+```
+</Tab>
+
+<Tab title="Potions">
+Purchase consumable items:
+
+```toml data/slayer/rewards.toml
+[[rewards]]
+id = "health_potion_bundle"
+display_name = "Health Potion Bundle"
+description = "Receive 5 health potions"
+cost = 10
+category = "potion"
+target_id = "health_potion"
+quantity = 5
+```
+</Tab>
+</Tabs>
+
+### Purchasing Rewards
+
+The purchase system validates player state and grants rewards:
+
+```rust src/game/slayer.rs:103-122
+fn apply_reward_purchase(
+    state: &mut crate::slayer::PlayerSlayerState,
+    reward_cost: i32,
+    plan: &RewardPurchasePlan,
+) {
+    match plan {
+        RewardPurchasePlan::UnlockMonster(monster_id) => {
+            state.points -= reward_cost;
+            state.unlocked_monsters.push(monster_id.clone());
+        }
+        RewardPurchasePlan::BlockMonster(monster_id) => {
+            state.points -= reward_cost;
+            state.blocked_monsters.push(monster_id.clone());
+        }
+        RewardPurchasePlan::GrantItem { .. } => {
+            state.points -= reward_cost;
+        }
+        RewardPurchasePlan::NoEffect => {}
+    }
+}
+```
+
+<Warning>
+For item rewards, the system checks inventory space before purchase:
+
+```rust src/game/slayer.rs:454-470
+if !player
+    .inventory
+    .has_space_for(item_id, *quantity, &self.item_registry)
+{
+    self.send_to_player(
+        player_id,
+        slayer_result(
+            false,
+            "buy_reward",
+            "Your inventory is full.",
+            None,
+            Some(state.points),
+        ),
+    )
+    .await;
+    return;
+}
+```
+</Warning>
+
+## Blocked Monsters
+
+Players can block monsters to prevent them from being assigned as tasks.
+
+### Blocking Monsters
+
+Blocks are purchased using slayer points (50 points per block):
+
+```rust src/slayer/registry.rs:102
+if player_state.blocked_monsters.contains(&t.monster_id) {
+    return false;
+}
+```
+
+### Removing Blocks
+
+Players can remove blocks at any time without cost:
+
+```rust src/game/slayer.rs:510-533
+pub async fn handle_slayer_remove_block(&self, player_id: &str, monster_id: &str) {
+    let mut state = self.get_player_slayer_state(player_id).await;
+
+    if let Some(pos) = state
+        .blocked_monsters
+        .iter()
+        .position(|monster| monster == monster_id)
+    {
+        state.blocked_monsters.remove(pos);
+        self.set_player_slayer_state(player_id, state.clone()).await;
+
+        self.send_to_player(
+            player_id,
+            slayer_result(
+                true,
+                "remove_block",
+                "Block removed.",
+                None,
+                Some(state.points),
+            ),
+        )
+        .await;
+    }
+}
+```
+
+## Task Management
+
+### Cancelling Tasks
+
+Players can cancel their current task for 30 slayer points:
+
+```rust src/game/slayer.rs:285-333
+pub async fn handle_slayer_cancel_task(&self, player_id: &str) {
+    let mut state = self.get_player_slayer_state(player_id).await;
+
+    if state.current_task.is_none() {
+        self.send_to_player(
+            player_id,
+            slayer_result(
+                false,
+                "cancel_task",
+                "You don't have an active task.",
+                None,
+                None,
+            ),
+        )
+        .await;
+        return;
+    }
+
+    if state.points < 30 {
+        self.send_to_player(
+            player_id,
+            slayer_result(
+                false,
+                "cancel_task",
+                "You need 30 slayer points to cancel a task.",
+                None,
+                Some(state.points),
+            ),
+        )
+        .await;
+        return;
+    }
+
+    state.points -= 30;
+    state.current_task = None;
+    self.set_player_slayer_state(player_id, state.clone()).await;
+
+    self.send_to_player(
+        player_id,
+        slayer_result(
+            true,
+            "cancel_task",
+            "Task cancelled. 30 points deducted.",
+            None,
+            Some(state.points),
+        ),
+    )
+    .await;
+}
+```
+
+<Note>
+Players cannot have multiple active tasks. They must complete or cancel their current task before receiving a new one:
+
+```rust src/game/slayer.rs:222-235
+if state.current_task.is_some() {
+    self.send_to_player(
+        player_id,
+        slayer_result(
+            false,
+            "get_task",
+            "You already have an active slayer task.",
+            None,
+            None,
+        ),
+    )
+    .await;
+    return;
+}
+```
+</Note>
+
+## Slayer Requirements
+
+Some monsters require a minimum slayer level to attack or be assigned as tasks.
+
+### Registering Requirements
+
+The registry tracks slayer level requirements for monsters:
+
+```rust src/slayer/registry.rs:38-46
+let mut slayer_requirements = HashMap::new();
+
+for master in masters_file.masters {
+    master_by_prototype.insert(master.entity_prototype.clone(), master.id.clone());
+    for task in &master.tasks {
+        if task.slayer_level_required > 0 {
+            slayer_requirements.insert(task.monster_id.clone(), task.slayer_level_required);
+        }
+    }
+    masters.insert(master.id.clone(), master);
+}
+```
+
+### Checking Requirements
+
+The system provides a method to check if a player can attack a monster:
+
+```rust src/slayer/registry.rs:83-85
+pub fn get_slayer_requirement(&self, monster_id: &str) -> Option<i32> {
+    self.slayer_requirements.get(monster_id).copied()
+}
+```
+
+### Task-Specific Requirements
+
+Individual tasks can have slayer level requirements higher than the master's requirement:
+
+```toml data/slayer/masters.toml
+[[masters.tasks]]
+monster_id = "rock_golem"
+display_name = "Rock Golems"
+count_min = 35
+count_max = 60
+weight = 4
+slayer_level_required = 50
+requires_unlock = true
+xp_per_kill = 80
+```
+
+## Data Configuration
+
+### Masters Configuration
+
+Masters are defined in `data/slayer/masters.toml`:
+
+```toml
+[[masters]]
+id = "master_id"
+display_name = "Display Name"
+entity_prototype = "npc_prototype_id"
+combat_level_required = 0
+slayer_level_required = 1
+points_per_task = 2
+
+[[masters.tasks]]
+monster_id = "monster_id"
+display_name = "Monster Name"
+count_min = 15
+count_max = 35
+weight = 10
+slayer_level_required = 0  # optional, defaults to 0
+requires_unlock = false     # optional, defaults to false
+xp_per_kill = 15           # optional, defaults to 15
+```
+
+### Rewards Configuration
+
+Rewards are defined in `data/slayer/rewards.toml`:
+
+```toml
+[[rewards]]
+id = "reward_id"
+display_name = "Reward Name"
+description = "Reward description"
+cost = 50
+category = "unlock"  # or "block", "equipment", "potion"
+target_id = "target_entity_or_item_id"  # optional
+quantity = 1  # optional, defaults to 1
+```
+
+## Registry Loading
+
+The slayer system loads configuration at server startup:
+
+```rust src/slayer/registry.rs:25-63
+pub fn load(data_dir: &Path) -> Result<Self, Box<dyn std::error::Error>> {
+    let slayer_dir = data_dir.join("slayer");
+
+    let masters_path = slayer_dir.join("masters.toml");
+    let masters_content = std::fs::read_to_string(&masters_path)?;
+    let masters_file: SlayerMastersFile = toml::from_str(&masters_content)?;
+
+    let rewards_path = slayer_dir.join("rewards.toml");
+    let rewards_content = std::fs::read_to_string(&rewards_path)?;
+    let rewards_file: SlayerRewardsFile = toml::from_str(&rewards_content)?;
+
+    let mut masters = HashMap::new();
+    let mut master_by_prototype = HashMap::new();
+    let mut slayer_requirements = HashMap::new();
+
+    for master in masters_file.masters {
+        master_by_prototype.insert(master.entity_prototype.clone(), master.id.clone());
+        for task in &master.tasks {
+            if task.slayer_level_required > 0 {
+                slayer_requirements.insert(task.monster_id.clone(), task.slayer_level_required);
+            }
+        }
+        masters.insert(master.id.clone(), master);
+    }
+
+    tracing::info!(
+        "Loaded {} slayer masters, {} rewards, {} level-gated monsters",
+        masters.len(),
+        rewards_file.rewards.len(),
+        slayer_requirements.len()
+    );
+
+    Ok(Self {
+        masters,
+        master_by_prototype,
+        rewards: rewards_file.rewards,
+        slayer_requirements,
+    })
+}
+```
+
+## Best Practices
+
+<CardGroup cols={2}>
+<Card title="Task Weight Balancing" icon="scale-balanced">
+Use weights to control task frequency. Higher weights make tasks more common. Common tasks should have weight 10, uncommon 6-8, rare 4 or less.
+</Card>
+
+<Card title="Progressive Unlocks" icon="lock-open">
+Set `requires_unlock = true` for high-value or powerful monsters to create progression gates and reward systems.
+</Card>
+
+<Card title="Level Requirements" icon="chart-line">
+Use `slayer_level_required` on individual tasks to create progression within a master's task pool.
+</Card>
+
+<Card title="Kill Count Ranges" icon="list-ol">
+Balance task length with kill counts. Early tasks: 15-40 kills. Mid-level: 30-60 kills. High-level: 40-80 kills.
+</Card>
+</CardGroup>
+
+## Example Implementation
+
+Here's a complete example of adding a new slayer master:
+
+```toml data/slayer/masters.toml
+[[masters]]
+id = "nieve"
+display_name = "Nieve"
+entity_prototype = "slayer_master_nieve"
+combat_level_required = 85
+slayer_level_required = 85
+points_per_task = 15
+
+[[masters.tasks]]
+monster_id = "dragon"
+display_name = "Dragons"
+count_min = 50
+count_max = 100
+weight = 8
+slayer_level_required = 75
+xp_per_kill = 120
+
+[[masters.tasks]]
+monster_id = "demon"
+display_name = "Demons"
+count_min = 40
+count_max = 80
+weight = 6
+slayer_level_required = 80
+requires_unlock = true
+xp_per_kill = 150
+
+[[masters.tasks]]
+monster_id = "abyssal_creature"
+display_name = "Abyssal Creatures"
+count_min = 60
+count_max = 120
+weight = 10
+slayer_level_required = 85
+xp_per_kill = 100
+```
+
+And corresponding unlock reward:
+
+```toml data/slayer/rewards.toml
+[[rewards]]
+id = "unlock_demon"
+display_name = "Unlock: Demons"
+description = "Unlock Demons as a slayer task from high-level masters"
+cost = 150
+category = "unlock"
+target_id = "demon"
+```
+
+## Testing
+
+The system includes unit tests for core functionality:
+
+```rust src/game/slayer.rs:558-594
+#[test]
+fn task_matches_kill_accepts_exact_and_variant_ids() {
+    assert!(task_matches_kill("goblin", "goblin"));
+    assert!(task_matches_kill("goblin", "goblin_champion"));
+    assert!(!task_matches_kill("goblin", "skeleton"));
+}
+
+#[test]
+fn plan_reward_purchase_validates_duplicates_and_block_targets() {
+    let mut state = crate::slayer::PlayerSlayerState {
+        points: 100,
+        ..Default::default()
+    };
+    state.unlocked_monsters.push("abyssal_demon".to_string());
+    state.blocked_monsters.push("cave_crawler".to_string());
+
+    assert_eq!(
+        plan_reward_purchase(
+            &state,
+            &reward("unlock_demon", 50, "unlock", Some("abyssal_demon"), 1),
+            None
+        ),
+        Err("Already unlocked.".to_string())
+    );
+    assert_eq!(
+        plan_reward_purchase(&state, &reward("block", 25, "block", None, 1), None),
+        Err("Select a monster to block.".to_string())
+    );
+    assert_eq!(
+        plan_reward_purchase(
+            &state,
+            &reward("block", 25, "block", None, 1),
+            Some("cave_crawler")
+        ),
+        Err("Already blocked.".to_string())
+    );
+}
+```

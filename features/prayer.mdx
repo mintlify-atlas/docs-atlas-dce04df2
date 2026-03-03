@@ -1,0 +1,639 @@
+---
+title: Prayer System
+description: Comprehensive guide to the Prayer system in Aeven - temporary buffs, prayer points, and drain mechanics
+---
+
+The Prayer system in Aeven provides temporary buffs to various player stats at the cost of draining prayer points. Players can activate prayers to gain advantages in combat, gathering, and health regeneration.
+
+## Overview
+
+Prayers grant powerful temporary bonuses but continuously drain prayer points while active. Each prayer belongs to a specific category, and only one prayer per category can be active at a time.
+
+<Info>
+Prayer points drain at regular intervals (every 600ms tick) based on the combined drain rate of all active prayers.
+</Info>
+
+## Prayer Categories
+
+Aeven features six distinct prayer categories, each affecting different aspects of gameplay:
+
+<CardGroup cols={2}>
+  <Card title="Attack" icon="crosshairs">
+    Boosts attack accuracy for better hit chance
+  </Card>
+  <Card title="Strength" icon="dumbbell">
+    Increases maximum hit damage output
+  </Card>
+  <Card title="Defence" icon="shield">
+    Enhances defence against incoming attacks
+  </Card>
+  <Card title="Protection" icon="shield-halved">
+    Reduces damage taken from all sources
+  </Card>
+  <Card title="HP Regen" icon="heart-pulse">
+    Multiplies health regeneration rate
+  </Card>
+  <Card title="Gathering" icon="hand-sparkles">
+    Speeds up resource gathering activities
+  </Card>
+</CardGroup>
+
+### Category Restriction
+
+<Warning>
+Only one prayer per category can be active at a time. Attempting to activate a second prayer in the same category will fail validation.
+</Warning>
+
+```rust prayer.rs:376-396
+/// Validate that a set of prayers can be activated together
+/// (only one prayer per category allowed)
+pub fn validate_prayer_set(&self, prayer_ids: &[String]) -> Result<(), String> {
+    let mut active_categories: HashMap<PrayerCategory, &str> = HashMap::new();
+
+    for id in prayer_ids {
+        if let Some(prayer) = self.prayers.get(id) {
+            if let Some(existing) = active_categories.get(&prayer.category) {
+                return Err(format!(
+                    "Cannot activate '{}' - '{}' is already active in the {} category",
+                    id,
+                    existing,
+                    prayer.category.as_str()
+                ));
+            }
+            active_categories.insert(prayer.category, id);
+        } else {
+            return Err(format!("Unknown prayer: {}", id));
+        }
+    }
+
+    Ok(())
+}
+```
+
+## Prayer Effects
+
+Each prayer provides a specific type of effect based on its category:
+
+### Effect Types
+
+| Effect Type | Description | Value Type |
+|------------|-------------|------------|
+| **AttackBonus** | Percentage bonus to attack accuracy | Percentage (e.g., 5.0 = +5%) |
+| **StrengthBonus** | Percentage bonus to max hit damage | Percentage (e.g., 15.0 = +15%) |
+| **DefenceBonus** | Percentage bonus to defence rating | Percentage (e.g., 10.0 = +10%) |
+| **DamageReduction** | Percentage reduction in damage taken | Percentage (e.g., 25.0 = -25% damage) |
+| **HPRegenMultiplier** | Multiplier for HP regeneration rate | Multiplier (e.g., 2.0 = 2x regen) |
+| **GatherSpeedBonus** | Percentage bonus to gathering speed | Percentage (e.g., 20.0 = +20% speed) |
+
+### Effect Calculations
+
+The system applies effects using specific formulas to ensure balanced gameplay:
+
+<CodeGroup>
+
+```rust Attack Bonus
+/// Apply attack bonus to a base attack value
+pub fn apply_attack_bonus(&self, base_attack: i32) -> i32 {
+    ((base_attack as f32) * (1.0 + self.attack_bonus / 100.0)).floor() as i32
+}
+```
+
+```rust Strength Bonus
+/// Apply strength bonus to a base max hit
+pub fn apply_strength_bonus(&self, base_max_hit: i32) -> i32 {
+    ((base_max_hit as f32) * (1.0 + self.strength_bonus / 100.0)).floor() as i32
+}
+```
+
+```rust Defence Bonus
+/// Apply defence bonus to a base defence value
+pub fn apply_defence_bonus(&self, base_defence: i32) -> i32 {
+    ((base_defence as f32) * (1.0 + self.defence_bonus / 100.0)).floor() as i32
+}
+```
+
+```rust Damage Reduction
+/// Apply damage reduction to incoming damage
+pub fn apply_damage_reduction(&self, incoming_damage: i32) -> i32 {
+    ((incoming_damage as f32) * (1.0 - self.damage_reduction / 100.0)).floor() as i32
+}
+```
+
+```rust Gather Speed
+/// Apply gathering speed bonus (returns speed multiplier)
+pub fn gather_speed_multiplier(&self) -> f32 {
+    1.0 + self.gather_speed_bonus / 100.0
+}
+```
+
+</CodeGroup>
+
+<Note>
+All percentage bonuses use floor rounding to ensure consistent integer results for stat calculations.
+</Note>
+
+## Prayer Points & Drain System
+
+Prayer points are consumed while prayers are active, creating a strategic resource management system.
+
+### Drain Mechanics
+
+- **Drain Rate**: Each prayer has a `drain_rate` value in prayer points per tick (600ms)
+- **Total Drain**: Combined drain from all active prayers is calculated every tick
+- **Multiple Prayers**: Drain rates stack when multiple prayers are active
+
+```rust prayer.rs:180-205
+impl ActivePrayerEffects {
+    /// Create new effects from a set of active prayers
+    pub fn from_prayers<'a>(prayers: impl Iterator<Item = &'a Prayer>) -> Self {
+        let mut effects = ActivePrayerEffects::default();
+        effects.hp_regen_multiplier = 1.0; // Base multiplier
+
+        for prayer in prayers {
+            match prayer.effect_type {
+                PrayerEffectType::AttackBonus => effects.attack_bonus += prayer.effect_value,
+                PrayerEffectType::StrengthBonus => effects.strength_bonus += prayer.effect_value,
+                PrayerEffectType::DefenceBonus => effects.defence_bonus += prayer.effect_value,
+                PrayerEffectType::DamageReduction => {
+                    effects.damage_reduction += prayer.effect_value
+                }
+                PrayerEffectType::HPRegenMultiplier => {
+                    effects.hp_regen_multiplier = prayer.effect_value
+                }
+                PrayerEffectType::GatherSpeedBonus => {
+                    effects.gather_speed_bonus += prayer.effect_value
+                }
+            }
+            effects.total_drain_rate += prayer.drain_rate;
+        }
+
+        effects
+    }
+}
+```
+
+### Example Drain Calculation
+
+<Steps>
+  <Step title="Activate Multiple Prayers">
+    Player activates:
+    - Clarity (Attack +5%, drain: 1.0/tick)
+    - Burst of Strength (Strength +5%, drain: 1.0/tick)
+  </Step>
+  
+  <Step title="Calculate Total Drain">
+    Total drain rate = 1.0 + 1.0 = 2.0 prayer points per tick
+  </Step>
+  
+  <Step title="Drain Over Time">
+    At 600ms intervals, 2.0 prayer points are consumed
+    
+    - After 1 second: ~3.3 points consumed
+    - After 1 minute: 200 points consumed
+  </Step>
+</Steps>
+
+## Prayer Definitions
+
+Prayers are defined in TOML configuration files with the following structure:
+
+```toml Example Prayer Definition
+[clarity]
+name = "Clarity"
+description = "Increases attack accuracy"
+level_req = 1
+category = "attack"
+effect_type = "attack_bonus"
+effect_value = 5.0
+drain_rate = 1.0
+icon = "prayer_clarity"
+```
+
+### Prayer Structure
+
+<ParamField path="name" type="string" optional>
+  Display name of the prayer (defaults to formatted ID)
+</ParamField>
+
+<ParamField path="description" type="string" optional>
+  Description text shown to players
+</ParamField>
+
+<ParamField path="level_req" type="i32" required>
+  Minimum Prayer level required to use this prayer
+</ParamField>
+
+<ParamField path="category" type="PrayerCategory" required>
+  Prayer category: `attack`, `strength`, `defence`, `protection`, `hp_regen`, or `gathering`
+</ParamField>
+
+<ParamField path="effect_type" type="PrayerEffectType" required>
+  Type of effect: `attack_bonus`, `strength_bonus`, `defence_bonus`, `damage_reduction`, `hp_regen_multiplier`, or `gather_speed_bonus`
+</ParamField>
+
+<ParamField path="effect_value" type="f32" required>
+  Effect magnitude (percentage for bonuses, multiplier for HP regen)
+</ParamField>
+
+<ParamField path="drain_rate" type="f32" required>
+  Prayer points consumed per 600ms tick
+</ParamField>
+
+<ParamField path="icon" type="string" optional>
+  Icon/sprite identifier for UI (defaults to `prayer_{id}`)
+</ParamField>
+
+## Prayer Registry
+
+The `PrayerRegistry` manages all prayer definitions and provides utility methods for prayer lookup and validation.
+
+### Loading Prayers
+
+```rust Loading from File
+let mut registry = PrayerRegistry::new();
+registry.load_from_file(&Path::new("data/prayers.toml"))?;
+```
+
+```rust Loading from Directory
+let mut registry = PrayerRegistry::new();
+registry.load_from_directory(&Path::new("data"))?;
+// Looks for prayers.toml in the data directory
+```
+
+### Registry Methods
+
+<Accordion title="Query Methods">
+
+```rust Get Prayer by ID
+let prayer = registry.get("clarity").unwrap();
+println!("Prayer: {}, Level: {}", prayer.name, prayer.level_req);
+```
+
+```rust Get Prayers by Category
+let attack_prayers = registry.get_by_category(PrayerCategory::Attack);
+for prayer in attack_prayers {
+    println!("{}: +{}%", prayer.name, prayer.effect_value);
+}
+```
+
+```rust Get Available Prayers by Level
+let available = registry.available_at_level(25);
+println!("Available at level 25: {} prayers", available.len());
+```
+
+```rust Get Available Prayers by Category and Level
+let available_by_category = registry.available_by_category(40);
+for (category, prayers) in available_by_category {
+    println!("{:?}: {} prayers", category, prayers.len());
+}
+```
+
+</Accordion>
+
+<Accordion title="Validation Methods">
+
+```rust Validate Prayer Set
+let prayer_ids = vec!["clarity".to_string(), "thick_skin".to_string()];
+match registry.validate_prayer_set(&prayer_ids) {
+    Ok(_) => println!("Valid prayer combination"),
+    Err(e) => println!("Invalid: {}", e),
+}
+```
+
+```rust Check Prayer Availability
+let prayer = registry.get("protection").unwrap();
+let player_level = 35;
+if prayer.can_use(player_level) {
+    println!("Player can use {}", prayer.name);
+} else {
+    println!("Requires level {}", prayer.level_req);
+}
+```
+
+</Accordion>
+
+<Accordion title="Effect Calculation">
+
+```rust Calculate Combined Effects
+let active_prayers = vec![
+    "clarity".to_string(),
+    "burst_of_strength".to_string(),
+    "thick_skin".to_string(),
+];
+
+let effects = registry.calculate_effects(&active_prayers);
+println!("Attack Bonus: +{}%", effects.attack_bonus);
+println!("Strength Bonus: +{}%", effects.strength_bonus);
+println!("Defence Bonus: +{}%", effects.defence_bonus);
+println!("Total Drain: {} points/tick", effects.total_drain_rate);
+```
+
+</Accordion>
+
+## Active Prayer Effects
+
+The `ActivePrayerEffects` struct aggregates all bonuses from active prayers:
+
+```rust prayer.rs:161-178
+/// Represents the combined effects of all active prayers
+#[derive(Debug, Clone, Default)]
+pub struct ActivePrayerEffects {
+    /// Percentage attack bonus (e.g., 15.0 for +15%)
+    pub attack_bonus: f32,
+    /// Percentage strength bonus
+    pub strength_bonus: f32,
+    /// Percentage defence bonus
+    pub defence_bonus: f32,
+    /// Percentage damage reduction (e.g., 25.0 for -25% damage taken)
+    pub damage_reduction: f32,
+    /// HP regen multiplier (e.g., 2.0 for 2x regen)
+    pub hp_regen_multiplier: f32,
+    /// Percentage gathering speed bonus
+    pub gather_speed_bonus: f32,
+    /// Total drain rate per tick (sum of all active prayers)
+    pub total_drain_rate: f32,
+}
+```
+
+### Creating Effect Aggregates
+
+```rust
+use std::collections::HashSet;
+
+// Get active prayers
+let active_prayer_ids = vec![
+    "incredible_clarity".to_string(),
+    "ultimate_strength".to_string(),
+    "steel_skin".to_string(),
+    "protection".to_string(),
+];
+
+// Calculate combined effects
+let effects = registry.calculate_effects(&active_prayer_ids);
+
+// Apply to combat calculations
+let modified_attack = effects.apply_attack_bonus(base_attack);
+let modified_max_hit = effects.apply_strength_bonus(base_max_hit);
+let modified_defence = effects.apply_defence_bonus(base_defence);
+let reduced_damage = effects.apply_damage_reduction(incoming_damage);
+```
+
+## Example Prayers
+
+Based on the test suite, here are example prayers from the game:
+
+<AccordionGroup>
+
+<Accordion title="Attack Prayers" icon="crosshairs">
+
+**Clarity** (Level 1)
+- Effect: +5% attack accuracy
+- Drain: 1.0 points/tick
+
+**Improved Clarity** (Level 10)
+- Effect: +10% attack accuracy  
+- Drain: 2.0 points/tick
+
+**Incredible Clarity** (Level 31)
+- Effect: +15% attack accuracy
+- Drain: 4.0 points/tick
+
+</Accordion>
+
+<Accordion title="Strength Prayers" icon="dumbbell">
+
+**Burst of Strength** (Level 4)
+- Effect: +5% max hit
+- Drain: 1.0 points/tick
+
+**Superhuman Strength** (Level 13)
+- Effect: +10% max hit
+- Drain: 2.0 points/tick
+
+**Ultimate Strength** (Level 34)
+- Effect: +15% max hit
+- Drain: 4.0 points/tick
+
+</Accordion>
+
+<Accordion title="Defence Prayers" icon="shield">
+
+**Thick Skin** (Level 1)
+- Effect: +5% defence
+- Drain: 1.0 points/tick
+
+**Rock Skin** (Level 10)
+- Effect: +10% defence
+- Drain: 2.0 points/tick
+
+**Steel Skin** (Level 28)
+- Effect: +15% defence
+- Drain: 4.0 points/tick
+
+</Accordion>
+
+<Accordion title="Protection Prayers" icon="shield-halved">
+
+**Protection** (Level 37)
+- Effect: -25% damage taken
+- Drain: 6.0 points/tick
+
+**Greater Protection** (Level 46)
+- Effect: -40% damage taken
+- Drain: 10.0 points/tick
+
+</Accordion>
+
+<Accordion title="HP Regen Prayers" icon="heart-pulse">
+
+**Rapid Heal** (Level 22)
+- Effect: 2x HP regeneration
+- Drain: 2.0 points/tick
+
+</Accordion>
+
+<Accordion title="Gathering Prayers" icon="hand-sparkles">
+
+**Resourcefulness** (Level 16)
+- Effect: +10% gathering speed
+- Drain: 2.0 points/tick
+
+**Greater Resourcefulness** (Level 43)
+- Effect: +20% gathering speed
+- Drain: 5.0 points/tick
+
+</Accordion>
+
+</AccordionGroup>
+
+## Testing Examples
+
+The prayer system includes comprehensive tests demonstrating usage patterns:
+
+<CodeGroup>
+
+```rust Load Prayers
+#[test]
+fn test_load_prayers_from_file() {
+    let mut registry = PrayerRegistry::new();
+    registry.load_from_file(&prayers_file).unwrap();
+
+    assert_eq!(registry.len(), 5);
+    assert!(registry.contains("clarity"));
+    
+    let clarity = registry.get("clarity").unwrap();
+    assert_eq!(clarity.name, "Clarity");
+    assert_eq!(clarity.level_req, 1);
+    assert_eq!(clarity.effect_value, 5.0);
+}
+```
+
+```rust Validate Prayer Sets
+#[test]
+fn test_validate_prayer_set() {
+    let mut registry = PrayerRegistry::new();
+    registry.load_from_file(&prayers_file).unwrap();
+
+    // Valid: different categories
+    assert!(
+        registry
+            .validate_prayer_set(&["clarity".to_string(), "thick_skin".to_string()])
+            .is_ok()
+    );
+
+    // Invalid: same category (attack)
+    assert!(
+        registry
+            .validate_prayer_set(&["clarity".to_string(), "improved_clarity".to_string()])
+            .is_err()
+    );
+}
+```
+
+```rust Apply Effects
+#[test]
+fn test_apply_effects() {
+    let effects = ActivePrayerEffects {
+        attack_bonus: 15.0,
+        strength_bonus: 15.0,
+        defence_bonus: 15.0,
+        damage_reduction: 25.0,
+        hp_regen_multiplier: 2.0,
+        gather_speed_bonus: 20.0,
+        total_drain_rate: 10.0,
+    };
+
+    // +15% attack: 100 -> 115
+    assert_eq!(effects.apply_attack_bonus(100), 115);
+
+    // +15% strength: 10 -> 11 (floor)
+    assert_eq!(effects.apply_strength_bonus(10), 11);
+
+    // -25% damage: 20 -> 15
+    assert_eq!(effects.apply_damage_reduction(20), 15);
+
+    // +20% gather speed: 1.2x multiplier
+    assert!((effects.gather_speed_multiplier() - 1.2).abs() < 0.001);
+}
+```
+
+</CodeGroup>
+
+## Best Practices
+
+<CardGroup cols={2}>
+
+<Card title="Resource Management" icon="battery-three-quarters">
+Monitor prayer points carefully - high-tier prayers drain quickly. Consider deactivating prayers when not actively needed.
+</Card>
+
+<Card title="Strategic Combinations" icon="puzzle-piece">
+Activate prayers from different categories to maximize effectiveness. You can use up to 6 prayers simultaneously (one per category).
+</Card>
+
+<Card title="Level Progression" icon="chart-line">
+Higher-level prayers in the same category provide better bonuses but consume prayer points faster. Upgrade prayers as your level increases.
+</Card>
+
+<Card title="Situational Activation" icon="lightbulb">
+Enable combat prayers before fights, gathering prayers while skilling, and HP regen during recovery periods to optimize prayer point usage.
+</Card>
+
+</CardGroup>
+
+## Technical Implementation
+
+### Data Loading
+
+Prayers are loaded from TOML files during server initialization:
+
+```rust prayer.rs:252-283
+/// Load prayer definitions from a TOML file
+pub fn load_from_file(&mut self, file_path: &Path) -> Result<(), String> {
+    if !file_path.exists() {
+        warn!("Prayer file does not exist: {:?}", file_path);
+        return Ok(());
+    }
+
+    let content = std::fs::read_to_string(file_path)
+        .map_err(|e| format!("Failed to read {:?}: {}", file_path, e))?;
+
+    let table: HashMap<String, RawPrayerDefinition> = toml::from_str(&content)
+        .map_err(|e| format!("Failed to parse {:?}: {}", file_path, e))?;
+
+    for (id, raw) in table {
+        if self.prayers.contains_key(&id) {
+            warn!("Duplicate prayer ID '{}', overwriting", id);
+        }
+        let prayer = Prayer::from_raw(&id, &raw);
+
+        // Add to category index
+        self.by_category
+            .entry(prayer.category)
+            .or_insert_with(Vec::new)
+            .push(id.clone());
+
+        self.prayers.insert(id, prayer);
+    }
+
+    info!("Loaded {} prayer definitions", self.prayers.len());
+
+    Ok(())
+}
+```
+
+### Category-Based Organization
+
+The registry maintains a category index for efficient lookups:
+
+```rust prayer.rs:301-307
+/// Get all prayers in a category
+pub fn get_by_category(&self, category: PrayerCategory) -> Vec<&Prayer> {
+    self.by_category
+        .get(&category)
+        .map(|ids| ids.iter().filter_map(|id| self.prayers.get(id)).collect())
+        .unwrap_or_default()
+}
+```
+
+## Related Systems
+
+<CardGroup cols={2}>
+
+<Card title="Skills System" icon="graduation-cap" href="/features/skills">
+Prayer level progression and experience
+</Card>
+
+<Card title="Combat System" icon="sword" href="/features/combat">
+How prayer bonuses affect combat calculations
+</Card>
+
+<Card title="World System" icon="map" href="/features/world">
+Altars and prayer recharge locations in the world
+</Card>
+
+<Card title="Items & Equipment" icon="shield" href="/features/items">
+Prayer-related items and equipment bonuses
+</Card>
+
+</CardGroup>

@@ -38,7 +38,12 @@
               "features/skills",
               "features/quests",
               "features/items",
-              "features/world"
+              "features/world",
+              "features/farming",
+              "features/crafting",
+              "features/prayer",
+              "features/arena",
+              "features/slayer"
             ]
           },
           {
