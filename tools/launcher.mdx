@@ -1,0 +1,439 @@
+---
+title: Launcher
+description: Desktop launcher for automatic updates and client launching
+---
+
+The launcher is a pure Rust desktop application that automatically downloads and updates the game client, displays live server statistics, and provides a one-click play experience.
+
+## Features
+
+- **Automatic updates**: Downloads and verifies client files using SHA-256 checksums
+- **Multi-platform**: Supports macOS (ARM64/x86_64), Windows (x86_64), Linux (x86_64)
+- **Live stats**: Real-time player count and leaderboard from server API
+- **Smart patching**: Only downloads changed files
+- **Offline support**: Runs without updates if client is current
+- **Custom branding**: Configurable logo and server URL
+- **One-click launch**: Auto-launches client on update completion
+
+## Building
+
+### Prerequisites
+
+- Rust toolchain (latest stable)
+- Platform-specific dependencies:
+  - **macOS**: Xcode Command Line Tools
+  - **Linux**: `libgtk-3-dev`, `libssl-dev`
+  - **Windows**: Visual Studio Build Tools
+
+### Local Build
+
+```bash
+cd launcher
+cargo build --release
+```
+
+The binary will be in `target/release/new-aeven-launcher` (or `.exe` on Windows).
+
+### Running
+
+```bash
+cargo run --release
+```
+
+Or run the built binary directly:
+
+```bash
+./target/release/new-aeven-launcher
+```
+
+## Configuration
+
+The launcher looks for `launcher-config.toml` in these locations (in order):
+
+1. Path specified in `LAUNCHER_CONFIG` environment variable
+2. Next to the launcher executable
+3. Current working directory
+
+### launcher-config.toml
+
+```toml
+# Base URL that hosts manifest.json and platform files
+base_url = "https://dl.aeven.xyz/isometric"
+
+# Relative path from base_url to the manifest
+manifest_path = "manifest.json"
+
+# Used only for the launcher data directory name
+app_name = "new_aeven"
+
+# Game server URL for fetching stats and leaderboard
+server_url = "https://aeven.xyz"
+```
+
+### Configuration Fields
+
+- **base_url**: CDN or server hosting the manifest and client files
+- **manifest_path**: Path to manifest.json (relative to base_url)
+- **app_name**: Application name (used for data directory)
+- **server_url**: Game server for live stats API
+
+### Environment Variables
+
+You can override settings with environment variables:
+
+- `LAUNCHER_BASE_URL`: Overrides `base_url`
+- `LAUNCHER_CONFIG`: Path to config file
+
+## Manifest Format
+
+The launcher downloads a manifest.json file that describes the client:
+
+```json
+{
+  "version": "2.17.1",
+  "platforms": {
+    "macos-arm64": {
+      "entrypoint": "new-aeven",
+      "files": [
+        {
+          "path": "new-aeven",
+          "sha256": "abc123...",
+          "size": 12345678,
+          "executable": true
+        },
+        {
+          "path": "assets/sprites.png",
+          "sha256": "def456...",
+          "size": 9876543
+        }
+      ]
+    },
+    "windows-x86_64": {
+      "entrypoint": "new-aeven.exe",
+      "files": [...]
+    }
+  }
+}
+```
+
+### Manifest Fields
+
+- **version**: Client version string (displayed in launcher)
+- **platforms**: Platform-specific build configurations
+  - **entrypoint**: Executable filename to launch
+  - **files**: Array of file entries
+    - **path**: Relative path within client directory
+    - **sha256**: SHA-256 checksum (lowercase hex)
+    - **size**: File size in bytes
+    - **executable**: (Optional) Set to true for executables
+    - **url**: (Optional) Custom download URL (defaults to `{base_url}/{platform}/{path}`)
+
+### Platform Keys
+
+Supported platform identifiers:
+
+- `macos-arm64` - macOS Apple Silicon
+- `macos-x86_64` - macOS Intel
+- `windows-x86_64` - Windows 64-bit
+- `linux-x86_64` - Linux 64-bit
+
+## Building a Manifest
+
+Aeven includes helper scripts for generating manifests:
+
+### 1. Package the Client
+
+```bash
+python3 tools/package_client.py \
+  --platform macos-arm64 \
+  --client-dir client \
+  --out dist/client/macos-arm64 \
+  --include-db \
+  --atlas-only
+```
+
+### 2. Generate Manifest
+
+```bash
+python3 tools/launcher_manifest.py \
+  --platform macos-arm64 \
+  --input dist/client/macos-arm64 \
+  --entrypoint new-aeven \
+  --version 2.17.1 \
+  --out dist/manifest.json
+```
+
+### 3. Add More Platforms
+
+Use `--merge` to add platforms to an existing manifest:
+
+```bash
+python3 tools/launcher_manifest.py \
+  --platform windows-x86_64 \
+  --input dist/client/windows-x86_64 \
+  --entrypoint new-aeven.exe \
+  --version 2.17.1 \
+  --out dist/manifest.json \
+  --merge
+```
+
+## CDN Layout
+
+Recommended file structure for CDN/server hosting:
+
+```
+/isometric/
+├── manifest.json
+├── macos-arm64/
+│   ├── new-aeven
+│   ├── assets/
+│   │   ├── sprites.png
+│   │   └── ...
+│   └── data/
+│       └── ...
+├── windows-x86_64/
+│   ├── new-aeven.exe
+│   └── ...
+└── linux-x86_64/
+    └── ...
+```
+
+Then set `base_url = "https://YOUR_CDN/isometric"`.
+
+## Update Process
+
+1. Launcher fetches `manifest.json`
+2. Compares each file's SHA-256 hash with local files
+3. Downloads only changed/missing files
+4. Verifies checksums during download
+5. Replaces old files atomically
+6. Sets executable permissions on platform-specific binaries
+7. Launches client
+
+### Smart Patching
+
+The launcher only downloads files that have changed:
+
+- If local file doesn't exist → download
+- If local file hash doesn't match → download
+- If local file hash matches → skip
+
+This minimizes bandwidth and update time.
+
+## Installation Directories
+
+The launcher stores files in platform-specific locations:
+
+- **macOS**: `~/Library/Application Support/New Aeven/new_aeven/client/`
+- **Windows**: `C:\Users\<USER>\AppData\Roaming\New Aeven\new_aeven\client\`
+- **Linux**: `~/.local/share/new_aeven/client/`
+
+Settings are stored in `launcher-settings.json` in the same directory.
+
+## Live Stats Integration
+
+The launcher fetches live data from the game server:
+
+### Server API Endpoints
+
+The launcher expects these endpoints on `server_url`:
+
+```
+GET /api/stats/overview
+```
+
+Returns:
+
+```json
+{
+  "online_players": 42,
+  "total_characters": 1234,
+  "total_accounts": 567
+}
+```
+
+```
+GET /api/stats/leaderboard?sort=total_level&limit=7
+```
+
+Returns:
+
+```json
+[
+  {
+    "name": "PlayerName",
+    "combat_level": 89,
+    "total_level": 1456,
+    "monster_kills": 5432
+  }
+]
+```
+
+### Stats Refresh
+
+Stats are refreshed every 30 seconds while the launcher is open.
+
+## Custom Branding
+
+### Logo
+
+Place a PNG file at `assets/logo.png` next to the launcher executable. The logo will be displayed at the top of the launcher window.
+
+Recommended size: 400×200 pixels or similar aspect ratio.
+
+### App Icon
+
+The launcher looks for `assets/app-icon.png` for the window/taskbar icon.
+
+Recommended size: 512×512 pixels.
+
+## User Settings
+
+The launcher saves user preferences:
+
+- **close_on_launch**: Whether to close the launcher when the game starts
+
+Settings are persisted in `launcher-settings.json`.
+
+## Dependencies
+
+Key Rust crates used:
+
+- **eframe/egui**: Cross-platform GUI framework
+- **reqwest**: HTTP client for downloads
+- **serde/serde_json**: JSON parsing
+- **toml**: Config file parsing
+- **sha2**: SHA-256 checksum verification
+- **directories**: Platform-specific paths
+
+## Theme
+
+The launcher uses a custom dark theme matching the game client:
+
+- Dark background (`#1e1e28`)
+- Accent green (`#64c878`)
+- Gold/silver/bronze for leaderboard rankings
+- Online status indicator
+
+## Troubleshooting
+
+### Launcher won't start
+
+Check that:
+- You have the correct Rust runtime (launcher is statically linked, so this is rare)
+- `launcher-config.toml` is present and valid
+- You have write permissions to the installation directory
+
+### Update fails
+
+Possible causes:
+- Network connectivity issues
+- CDN/server is down
+- Manifest.json is malformed
+- Hash mismatch (file corrupted during download)
+
+Check the console output for error details.
+
+### Client won't launch
+
+Verify:
+- Entrypoint file exists and is executable
+- Platform matches your system
+- Client has all required dependencies
+- Working directory is set correctly
+
+### Stats not loading
+
+Check:
+- `server_url` is correct in config
+- Server is reachable
+- API endpoints return valid JSON
+- CORS is configured if running on different origin
+
+## Security
+
+### File Verification
+
+All downloaded files are verified with SHA-256 checksums:
+
+- If hash doesn't match, download is rejected
+- Files are downloaded to `.download` temp files
+- Only moved to final location after verification
+
+### HTTPS
+
+Always use HTTPS for `base_url` and `server_url` to prevent:
+- Man-in-the-middle attacks
+- File tampering during download
+
+### Sandbox
+
+The launcher doesn't execute any downloaded code - it only launches the client binary after verification.
+
+## Advanced
+
+### Custom Download URLs
+
+You can override download URLs per-file in the manifest:
+
+```json
+{
+  "path": "new-aeven",
+  "sha256": "...",
+  "size": 12345,
+  "url": "https://custom-cdn.example.com/client/new-aeven",
+  "executable": true
+}
+```
+
+This is useful for:
+- Split hosting (binaries on one CDN, assets on another)
+- A/B testing different asset versions
+- Regional CDN routing
+
+### Headless Mode
+
+While the launcher is primarily GUI-based, you can disable auto-launch in the code by modifying `launcher/src/main.rs:225` and setting `auto_launch: false`.
+
+## Development
+
+### Project Structure
+
+```
+launcher/
+├── src/
+│   └── main.rs         # All launcher code (single file)
+├── assets/
+│   ├── logo.png        # Launcher logo
+│   └── app-icon.png    # Window icon
+├── Cargo.toml
+├── launcher-config.toml
+└── README.md
+```
+
+### Adding Features
+
+The launcher is intentionally minimal. When adding features:
+
+1. Keep it single-file if possible
+2. Avoid external scripts/processes
+3. Maintain cross-platform compatibility
+4. Test on all supported platforms
+
+### Building for Distribution
+
+```bash
+# Build release binary
+cargo build --release
+
+# Strip debug symbols (Linux/macOS)
+strip target/release/new-aeven-launcher
+
+# Create distributable package
+mkdir -p dist/launcher
+cp target/release/new-aeven-launcher dist/launcher/
+cp launcher-config.toml dist/launcher/
+cp -r assets dist/launcher/
+```
+
+On macOS, you may want to create an `.app` bundle. On Windows, use an installer generator like WiX or Inno Setup.

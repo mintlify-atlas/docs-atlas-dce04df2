@@ -1,0 +1,664 @@
+---
+title: Quest Scripting
+description: Lua-based quest scripting system for branching dialogue and complex logic
+---
+
+Aeven uses a hybrid quest system combining TOML for metadata and Lua for complex scripting. This allows simple quests to be defined purely in TOML while complex quests with branching dialogue, conditional logic, and dynamic rewards can use Lua scripts.
+
+## Architecture
+
+### TOML Quest Definitions
+
+Quest metadata, objectives, and basic rewards are defined in TOML files:
+
+- **Location**: `rust-server/data/quests/`
+- **Format**: TOML
+- **Purpose**: Declarative quest structure
+
+### Lua Quest Scripts
+
+Complex quest logic is handled by Lua scripts:
+
+- **Location**: `rust-server/data/scripts/quests/`
+- **Format**: Lua
+- **Purpose**: Dialogue trees, conditional logic, dynamic rewards
+
+### Hot Reload
+
+Both TOML and Lua files support hot reloading - changes are detected and applied without server restart.
+
+## Quest Definition (TOML)
+
+### Basic Structure
+
+```toml
+[quest]
+id = "axe_to_grind"
+name = "Axe to Grind"
+description = "Learn woodcutting from Lumberjack Pete"
+giver_npc = "lumberjack_pete"
+level_required = 1
+repeatable = false
+lua_script = "tutorial/axe_to_grind.lua"
+
+[[quest.objectives]]
+id = "chop_oak_trees"
+type = "deplete_tree"
+target = "oak"
+count = 5
+description = "Chop down 5 oak trees"
+
+[[quest.objectives]]
+id = "return_to_pete"
+type = "talk_to"
+target = "lumberjack_pete"
+description = "Return to Lumberjack Pete"
+sequential = true
+
+[quest.rewards]
+exp = 250
+gold = 50
+items = [
+    { id = "iron_axe", count = 1 },
+]
+```
+
+### Quest Fields
+
+#### [quest] Section
+
+- **id**: Unique quest identifier (kebab-case)
+- **name**: Display name shown to players
+- **description**: Quest description for journal
+- **giver_npc**: NPC entity ID that offers this quest
+- **level_required**: Minimum player level (default: 1)
+- **repeatable**: Whether quest can be repeated after completion (default: false)
+- **lua_script**: (Optional) Path to Lua script (relative to `data/scripts/quests/`)
+
+#### [[quest.objectives]]
+
+Objectives are defined as an array of tables:
+
+- **id**: Unique objective identifier within this quest
+- **type**: Objective type (see Objective Types below)
+- **target**: Target entity/item/location ID
+- **count**: Number required (default: 1)
+- **description**: Display text for quest journal
+- **sequential**: (Optional) Must complete previous objectives first (default: false)
+- **dialogue**: (Optional) Dialogue shown on completion
+
+#### [quest.rewards]
+
+- **exp**: Experience points awarded
+- **gold**: Gold awarded
+- **items**: Array of `{ id = "item_id", count = 1 }` items
+
+#### [quest.chain]
+
+Optional quest chain configuration:
+
+```toml
+[quest.chain]
+previous = "other_quest_id"  # Must complete this quest first
+next = "sequel_quest_id"      # Unlocks after completing this
+branch_from = "main_quest"   # Alternative path from this quest
+```
+
+#### [quest.dialogue]
+
+Optional simple dialogue (for quests without Lua scripts):
+
+```toml
+[quest.dialogue]
+offer = "Want to learn woodcutting?"
+accept = "Here's an axe!"
+progress = "Still working on it?"
+complete = "Well done!"
+```
+
+## Objective Types
+
+Supported objective types:
+
+| Type | Description | Target |
+|------|-------------|--------|
+| `kill_monster` | Kill X monsters | Monster entity ID |
+| `collect_item` | Collect X items | Item ID |
+| `talk_to` | Talk to an NPC | NPC entity ID |
+| `reach_location` | Reach a location | Location ID |
+| `deplete_tree` | Chop down X trees | Tree type ID |
+| `deplete_rock` | Mine X rocks | Rock type ID |
+| `reach_level` | Reach skill level X | Skill name |
+| `reach_gold` | Accumulate X gold | (count field) |
+
+### Aliases
+
+Objective types have aliases for convenience:
+
+- `kill_monster` = `kill`
+- `collect_item` = `collect`
+- `talk_to` = `talk`
+- `reach_location` = `reach`, `location`
+- `deplete_tree` = `chop_tree`, `deplete`
+- `deplete_rock` = `mine_rock`
+- `reach_level` = `level`, `skill_level`
+- `reach_gold` = `gold`, `gather_gold`
+
+## Quest Scripts (Lua)
+
+### Entry Point
+
+Every quest script must define an `on_interact(ctx)` function:
+
+```lua
+function on_interact(ctx)
+    local quest_state = ctx:get_quest_state()
+    
+    if quest_state == "not_started" then
+        -- Offer the quest
+    elseif quest_state == "in_progress" then
+        -- Show progress
+    elseif quest_state == "ready_to_complete" then
+        -- Complete the quest
+    elseif quest_state == "completed" then
+        -- Post-completion dialogue
+    end
+end
+```
+
+### Quest States
+
+`ctx:get_quest_state()` returns:
+
+- `"not_started"` - Player hasn't accepted the quest
+- `"in_progress"` - Quest is active but not complete
+- `"ready_to_complete"` - All objectives finished
+- `"completed"` - Quest was completed
+
+### Context API
+
+The `ctx` object provides these methods:
+
+#### Quest Control
+
+```lua
+ctx:accept_quest()           -- Accept the quest
+ctx:complete_quest()         -- Mark quest complete and grant rewards
+ctx:unlock_quest("quest_id") -- Unlock another quest
+```
+
+#### Dialogue
+
+```lua
+-- Show simple dialogue (no choices)
+ctx:show_dialogue({
+    speaker = "NPC Name",
+    text = "Hello, adventurer!"
+})
+
+-- Show dialogue with choices
+local choice = ctx:show_dialogue({
+    speaker = "NPC Name",
+    text = "What would you like?",
+    choices = {
+        { id = "accept", text = "I'll help!" },
+        { id = "decline", text = "Not now." },
+        { id = "ask", text = "Tell me more." }
+    }
+})
+
+if choice == "accept" then
+    -- Handle accept
+elseif choice == "ask" then
+    -- Handle ask
+end
+```
+
+#### Objective Progress
+
+```lua
+local progress = ctx:get_objective_progress("objective_id")
+-- Returns: { current = 3, target = 5 }
+
+print("Progress: " .. progress.current .. "/" .. progress.target)
+```
+
+#### Quest Duration
+
+```lua
+local seconds = ctx:get_quest_duration()
+-- Returns number of seconds since quest was accepted
+```
+
+#### Notifications
+
+```lua
+ctx:show_notification("You found a hidden treasure!")
+```
+
+#### Items
+
+```lua
+ctx:give_item("item_id", 1)  -- Give item to player
+```
+
+#### Bonus Rewards
+
+```lua
+ctx:grant_bonus_reward({
+    gold = 100,
+    exp = 500,
+    items = { { "rare_sword", 1 } }
+})
+```
+
+#### Waystones
+
+```lua
+ctx:unlock_waystone("waystone_id")
+```
+
+### Example: Simple Quest
+
+```lua
+function on_interact(ctx)
+    local quest_state = ctx:get_quest_state()
+    
+    if quest_state == "not_started" then
+        local choice = ctx:show_dialogue({
+            speaker = "Old Farmer",
+            text = "My crops are being eaten by rats! Can you kill 10 of them?",
+            choices = {
+                { id = "accept", text = "I'll handle it." },
+                { id = "decline", text = "Not interested." }
+            }
+        })
+        
+        if choice == "accept" then
+            ctx:accept_quest()
+            ctx:show_dialogue({
+                speaker = "Old Farmer",
+                text = "Thank you! The rats are in the barn."
+            })
+        end
+    elseif quest_state == "in_progress" then
+        local progress = ctx:get_objective_progress("kill_rats")
+        ctx:show_dialogue({
+            speaker = "Old Farmer",
+            text = string.format("You've killed %d of 10 rats. Keep going!", progress.current)
+        })
+    elseif quest_state == "ready_to_complete" then
+        ctx:show_dialogue({
+            speaker = "Old Farmer",
+            text = "All the rats are gone! Here's your reward."
+        })
+        ctx:complete_quest()
+    else
+        ctx:show_dialogue({
+            speaker = "Old Farmer",
+            text = "Thanks again for helping with those rats!"
+        })
+    end
+end
+```
+
+### Example: Branching Dialogue
+
+```lua
+function on_interact(ctx)
+    local quest_state = ctx:get_quest_state()
+    
+    if quest_state == "not_started" then
+        offer_quest(ctx)
+    elseif quest_state == "ready_to_complete" then
+        complete_quest(ctx)
+    end
+end
+
+function offer_quest(ctx)
+    local choice = ctx:show_dialogue({
+        speaker = "Mysterious Stranger",
+        text = "I have a task for you, but it's dangerous. Interested?",
+        choices = {
+            { id = "yes", text = "Yes, tell me more." },
+            { id = "no", text = "No thanks." },
+            { id = "who", text = "Who are you?" }
+        }
+    })
+    
+    if choice == "who" then
+        ctx:show_dialogue({
+            speaker = "Mysterious Stranger",
+            text = "I'm just a traveler who needs help. Now, will you assist me?"
+        })
+        return offer_quest(ctx)  -- Recursive call
+    elseif choice == "yes" then
+        ask_for_details(ctx)
+    else
+        ctx:show_dialogue({
+            speaker = "Mysterious Stranger",
+            text = "Very well. Perhaps another time."
+        })
+    end
+end
+
+function ask_for_details(ctx)
+    local choice = ctx:show_dialogue({
+        speaker = "Mysterious Stranger",
+        text = "I need you to retrieve an ancient artifact from the ruins. The path is perilous. Are you ready?",
+        choices = {
+            { id = "accept", text = "I'm ready!" },
+            { id = "back", text = "Wait, tell me more first." }
+        }
+    })
+    
+    if choice == "accept" then
+        ctx:accept_quest()
+        ctx:give_item("ruins_key", 1)
+        ctx:show_dialogue({
+            speaker = "Mysterious Stranger",
+            text = "Here's a key to the ruins. Good luck!"
+        })
+    else
+        return offer_quest(ctx)  -- Go back
+    end
+end
+
+function complete_quest(ctx)
+    ctx:show_dialogue({
+        speaker = "Mysterious Stranger",
+        text = "You found it! You have my gratitude."
+    })
+    ctx:complete_quest()
+end
+```
+
+### Example: Conditional Rewards
+
+```lua
+function on_interact(ctx)
+    local quest_state = ctx:get_quest_state()
+    
+    if quest_state == "ready_to_complete" then
+        local duration = ctx:get_quest_duration()
+        
+        ctx:show_dialogue({
+            speaker = "Speed Runner",
+            text = "You completed it! Let me check how fast you were..."
+        })
+        
+        if duration < 300 then  -- Under 5 minutes
+            ctx:show_notification("Speed bonus: +500 gold!")
+            ctx:grant_bonus_reward({ gold = 500 })
+            ctx:show_dialogue({
+                speaker = "Speed Runner",
+                text = "Incredible! That was under 5 minutes. Here's a speed bonus!"
+            })
+        else
+            ctx:show_dialogue({
+                speaker = "Speed Runner",
+                text = "Good job, but you could be faster!"
+            })
+        end
+        
+        ctx:complete_quest()
+    end
+end
+```
+
+## Objective Progress Handler
+
+Optionally implement `on_objective_progress(ctx, objective_id, new_count)` to react to progress:
+
+```lua
+function on_objective_progress(ctx, objective_id, new_count)
+    if objective_id == "kill_wolves" then
+        if new_count == 5 then
+            ctx:show_notification("Halfway there!")
+        elseif new_count == 10 then
+            ctx:show_notification("All wolves defeated! Return to the hunter.")
+        end
+    end
+end
+```
+
+## Lua Sandbox
+
+Quest scripts run in a sandboxed Lua environment:
+
+### Disabled Functions
+
+For security, these are disabled:
+
+- `os.*` - Operating system access
+- `io.*` - File I/O
+- `loadfile`, `dofile` - External file loading
+- `require` - Module loading (use script-local functions instead)
+
+### Available Libraries
+
+- `string.*` - String manipulation
+- `math.*` - Math functions
+- `table.*` - Table utilities
+
+### Global Functions
+
+Standard Lua functions are available:
+
+- `print()` - Logs to server console
+- `type()`, `tonumber()`, `tostring()` - Type conversion
+- `pairs()`, `ipairs()` - Iteration
+
+## Best Practices
+
+### Structure Your Scripts
+
+Break complex logic into helper functions:
+
+```lua
+function on_interact(ctx)
+    local state = ctx:get_quest_state()
+    
+    if state == "not_started" then
+        offer_dialogue(ctx)
+    elseif state == "in_progress" then
+        progress_dialogue(ctx)
+    elseif state == "ready_to_complete" then
+        completion_dialogue(ctx)
+    else
+        post_completion_dialogue(ctx)
+    end
+end
+
+function offer_dialogue(ctx)
+    -- ...
+end
+
+function progress_dialogue(ctx)
+    -- ...
+end
+```
+
+### Use Local Variables
+
+```lua
+local quest_state = ctx:get_quest_state()
+local progress = ctx:get_objective_progress("obj_id")
+```
+
+### Validate Player Choices
+
+Always handle all possible dialogue choices:
+
+```lua
+local choice = ctx:show_dialogue({ ... })
+
+if choice == "accept" then
+    -- ...
+elseif choice == "decline" then
+    -- ...
+else
+    -- Handle unexpected case
+end
+```
+
+### Keep Scripts Simple
+
+Complex state machines belong in game code, not quest scripts. Use scripts for:
+
+- Dialogue trees
+- Conditional rewards
+- Quest unlocking logic
+- Progress notifications
+
+## File Organization
+
+Organize quests by category:
+
+```
+data/quests/
+├── tutorial/
+│   ├── first_quest.toml
+│   └── second_quest.toml
+├── swamp/
+│   └── swamp_quest.toml
+└── progression/
+    └── tier_1.toml
+
+data/scripts/quests/
+├── tutorial/
+│   ├── first_quest.lua
+│   └── second_quest.lua
+├── swamp/
+│   └── swamp_quest.lua
+└── progression/
+    └── tier_1.lua
+```
+
+## Testing
+
+### In-Game Testing
+
+1. Place TOML file in `data/quests/`
+2. Place Lua file in `data/scripts/quests/`
+3. Reload quests with admin command: `/reload_quests`
+4. Talk to the quest giver NPC
+
+### Debugging
+
+Use `print()` in Lua scripts to log to server console:
+
+```lua
+print("Quest state: " .. quest_state)
+print("Progress: " .. progress.current .. "/" .. progress.target)
+```
+
+### Common Errors
+
+**"Quest not found"**
+- Check quest ID matches between TOML and NPC definition
+- Verify TOML file is in `data/quests/`
+
+**"Script has no on_interact function"**
+- Ensure `on_interact(ctx)` is defined
+- Check for typos in function name
+
+**"Invalid objective type"**
+- Verify objective `type` is one of the supported types
+- Check for typos
+
+**Dialogue not showing**
+- Check `speaker` and `text` fields are present
+- Verify syntax of `ctx:show_dialogue()`
+
+## Advanced Topics
+
+### Quest Chains
+
+Create quest sequences using the chain system:
+
+```toml
+# Quest 1
+[quest]
+id = "chain_part_1"
+
+[quest.chain]
+next = "chain_part_2"
+
+# Quest 2
+[quest]
+id = "chain_part_2"
+
+[quest.chain]
+previous = "chain_part_1"
+next = "chain_part_3"
+```
+
+### Branching Paths
+
+Create alternate quest paths:
+
+```toml
+# Main quest
+[quest]
+id = "main_quest"
+
+# Branch A
+[quest]
+id = "branch_a"
+[quest.chain]
+branch_from = "main_quest"
+
+# Branch B
+[quest]
+id = "branch_b"
+[quest.chain]
+branch_from = "main_quest"
+```
+
+### Repeatable Quests
+
+Daily/weekly quests:
+
+```toml
+[quest]
+repeatable = true
+```
+
+In the script, handle completed state:
+
+```lua
+if quest_state == "completed" then
+    ctx:show_dialogue({
+        speaker = "Quest Giver",
+        text = "You can do this quest again tomorrow!"
+    })
+end
+```
+
+## Reference
+
+### Full Context API
+
+```lua
+-- Quest state
+ctx:get_quest_state() → "not_started" | "in_progress" | "ready_to_complete" | "completed"
+ctx:accept_quest()
+ctx:complete_quest()
+ctx:unlock_quest(quest_id)
+
+-- Dialogue
+ctx:show_dialogue({ speaker, text, choices? }) → choice_id?
+ctx:show_notification(text)
+
+-- Progress
+ctx:get_objective_progress(objective_id) → { current, target }
+ctx:get_quest_duration() → seconds
+
+-- Rewards
+ctx:give_item(item_id, count)
+ctx:grant_bonus_reward({ gold?, exp?, items? })
+
+-- World
+ctx:unlock_waystone(waystone_id)
+```

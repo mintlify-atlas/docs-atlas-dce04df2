@@ -1,0 +1,353 @@
+---
+title: Skills & Leveling
+description: RuneScape-inspired XP and skill progression system
+---
+
+Aeven features a **RuneScape-style** skills system with 15 different skills, XP-based leveling, and a maximum level of 99.
+
+## Skills Overview
+
+### Combat Skills
+
+- **Hitpoints**: Max HP (1 HP per level, starts at 10)
+- **Attack**: Accuracy in melee combat (starts at 1)
+- **Strength**: Max hit in melee combat (starts at 1)
+- **Defence**: Evasion rolls in combat (starts at 1)
+- **Ranged**: Accuracy and damage with bows (starts at 1)
+- **Prayer**: Max prayer points (1 point per level, starts at 1)
+- **Magic**: Spell casting skill for damage and healing spells (starts at 1)
+
+### Gathering Skills
+
+- **Fishing**: Gathering skill for catching fish (starts at 1)
+- **Woodcutting**: Chopping trees for logs (starts at 1)
+- **Mining**: Mining ore from rocks (starts at 1)
+
+### Production Skills
+
+- **Smithing**: Crafting skill for forging weapons and armor (starts at 1)
+- **Farming**: Growing crops in allotment patches (starts at 1)
+- **Alchemy**: Potion brewing and transmutation (starts at 1)
+
+### Other Skills
+
+- **Slayer**: Unlocks access to slayer-only areas and monsters (starts at 1)
+- **Survivalist**: Wilderness survival and crafting (starts at 1)
+
+## XP and Leveling
+
+### XP Formula
+
+Aeven uses the **RuneScape XP formula**:
+
+```rust
+// From rust-server/src/skills.rs
+pub const MAX_LEVEL: i32 = 99;
+
+pub fn total_xp_for_level(level: i32) -> i64 {
+    if level <= 1 {
+        return 0;
+    }
+    let mut total = 0.0;
+    for l in 1..level {
+        total += (l as f64 + 300.0 * 2.0_f64.powf(l as f64 / 7.0)) / 4.0;
+    }
+    total.floor() as i64
+}
+```
+
+**XP Requirements**:
+- **Level 1**: 0 XP
+- **Level 2**: 83 XP
+- **Level 50**: 101,333 XP
+- **Level 99**: 13,034,431 XP
+
+### Level Calculation
+
+Level is calculated from total XP using binary search:
+
+```rust
+pub fn level_for_xp(xp: i64) -> i32 {
+    let mut low = 1;
+    let mut high = MAX_LEVEL;
+    
+    while low < high {
+        let mid = (low + high + 1) / 2;
+        if total_xp_for_level(mid) <= xp {
+            low = mid;
+        } else {
+            high = mid - 1;
+        }
+    }
+    low
+}
+```
+
+### Skill Structure
+
+```rust
+pub struct Skill {
+    pub level: i32,  // Current level (1-99)
+    pub xp: i64,     // Total XP earned
+}
+
+impl Skill {
+    pub fn add_xp(&mut self, amount: i64) -> bool {
+        self.xp += amount;
+        let new_level = level_for_xp(self.xp);
+        
+        if new_level > self.level {
+            self.level = new_level.min(MAX_LEVEL);
+            true  // Leveled up!
+        } else {
+            false
+        }
+    }
+}
+```
+
+## Combat XP
+
+### XP per Damage
+
+Combat XP is awarded based on damage dealt:
+
+```rust
+// From rust-server/src/skills.rs
+pub const ATTACK_XP_PER_DAMAGE: f64 = 4.0;
+pub const STRENGTH_XP_PER_DAMAGE: f64 = 4.0;
+pub const DEFENCE_XP_PER_DAMAGE: f64 = 4.0;
+pub const CONTROLLED_XP_PER_DAMAGE: f64 = 1.33;  // Split 3 ways
+pub const HITPOINTS_XP_PER_DAMAGE: f64 = 1.33;  // Always awarded
+pub const RANGED_XP_PER_DAMAGE: f64 = 4.0;
+pub const LONGRANGE_RANGED_XP_PER_DAMAGE: f64 = 2.0;
+pub const LONGRANGE_DEFENCE_XP_PER_DAMAGE: f64 = 2.0;
+```
+
+### Combat Styles
+
+XP distribution depends on combat style:
+
+<Tabs>
+  <Tab title="Melee">
+    **Accurate**: 4 XP/damage to Attack
+    
+    **Aggressive**: 4 XP/damage to Strength
+    
+    **Defensive**: 4 XP/damage to Defence
+    
+    **Controlled**: 1.33 XP/damage to Attack, Strength, Defence (4 XP total)
+  </Tab>
+  <Tab title="Ranged">
+    **Accurate**: 4 XP/damage to Ranged
+    
+    **Rapid**: 4 XP/damage to Ranged (faster attack speed)
+    
+    **Longrange**: 2 XP/damage to Ranged, 2 XP/damage to Defence
+  </Tab>
+</Tabs>
+
+**Hitpoints**: Always receives 1.33 XP per damage dealt, regardless of combat style.
+
+<CodeGroup>
+```rust Award XP Example
+// Player deals 15 damage with Aggressive style
+let damage = 15;
+let style = CombatStyle::Aggressive;
+
+// Strength: 15 * 4.0 = 60 XP
+player.skills.strength.add_xp(60);
+
+// Hitpoints: 15 * 1.33 = 20 XP (rounded)
+player.skills.hitpoints.add_xp(20);
+```
+
+```rust Controlled Example
+// Player deals 12 damage with Controlled style
+let damage = 12;
+let xp = (12 as f64 * 1.33) as i64;  // 16 XP
+
+// Each combat skill gets 16 XP
+player.skills.attack.add_xp(16);
+player.skills.strength.add_xp(16);
+player.skills.defence.add_xp(16);
+
+// Hitpoints gets separate 16 XP
+player.skills.hitpoints.add_xp(16);
+```
+</CodeGroup>
+
+## Skill Benefits
+
+### Hitpoints
+
+```rust
+pub fn max_hp(&self) -> i32 {
+    self.skills.hitpoints.level  // 1 HP per level
+}
+```
+
+**Leveling Benefits**:
+- +1 max HP per level
+- Full heal on level up
+- Starts at 10 HP (level 10)
+
+### Attack
+
+Increases accuracy in melee combat:
+
+```rust
+// Higher attack level = higher accuracy roll
+let attack_roll = rng.gen_range(0..=(attacker_level + attacker_bonus));
+```
+
+### Strength
+
+Increases max hit in melee combat:
+
+```rust
+pub fn calculate_max_hit(strength_level: i32, strength_bonus: i32) -> i32 {
+    let effective_strength = strength_level + strength_bonus;
+    ((effective_strength as f64 * 0.5 + 0.5).floor() as i32).max(1)
+}
+```
+
+### Defence
+
+Increases evasion in combat:
+
+```rust
+// Higher defence level = higher evasion roll
+let defence_roll = rng.gen_range(0..=(defender_level + defender_bonus));
+```
+
+### Ranged
+
+Affects accuracy and damage with bows:
+
+```rust
+// Similar to melee but uses ranged level and bonuses
+let ranged_accuracy = ranged_level + ranged_bonus;
+let ranged_max_hit = calculate_max_hit(ranged_level, ranged_bonus);
+```
+
+### Prayer
+
+Increases max prayer points:
+
+```rust
+pub fn max_prayer_points(&self) -> i32 {
+    10 + self.skills.prayer.level  // 10 base + 1 per level
+}
+```
+
+### Magic
+
+Increases max mana and spell power:
+
+```rust
+pub fn max_mp(&self) -> i32 {
+    10 + self.skills.magic.level * 2  // 10 base + 2 per level
+}
+```
+
+### Gathering Skills
+
+Unlock access to higher-tier resources:
+
+- **Fishing**: Better fish require higher levels
+- **Woodcutting**: Harder trees require higher levels
+- **Mining**: Higher-tier ores require higher levels
+
+### Slayer
+
+Unlocks slayer-only areas and monsters:
+
+```rust
+// From interior registry
+if interior.requires_slayer_task && !player_has_matching_task {
+    return Err("You need a slayer task to enter here.");
+}
+```
+
+## Combat Level
+
+Combat level is calculated from combat skills:
+
+```rust
+pub fn combat_level(&self) -> i32 {
+    let base = 0.25 * (self.defence.level + self.hitpoints.level + (self.prayer.level / 2)) as f64;
+    
+    let melee = 0.325 * (self.attack.level + self.strength.level) as f64;
+    let ranged = 0.325 * ((self.ranged.level * 3) / 2) as f64;
+    let magic = 0.325 * ((self.magic.level * 3) / 2) as f64;
+    
+    let combat = base + melee.max(ranged).max(magic);
+    combat.floor() as i32
+}
+```
+
+**Formula**:
+- Base: Defence + Hitpoints + Prayer/2
+- Offense: Best of Melee, Ranged, or Magic
+- Combat Level = 0.25 × Base + 0.325 × Offense
+
+## Leveling Feedback
+
+### Level Up Notification
+
+When a skill levels up:
+
+1. Server broadcasts level up message
+2. Floating "LEVEL UP!" text animation
+3. Full HP/prayer/mana restore (for combat stats)
+4. XP bar updated with new requirements
+
+### XP Bar UI
+
+The client displays:
+
+- Current XP / XP needed for next level
+- Progress bar visualization
+- Skill level and icon
+
+## Total Level
+
+**Total Level** is the sum of all skill levels:
+
+```rust
+pub fn total_level(&self) -> i32 {
+    self.hitpoints.level +
+    self.attack.level +
+    self.strength.level +
+    self.defence.level +
+    self.ranged.level +
+    self.fishing.level +
+    self.farming.level +
+    self.smithing.level +
+    self.prayer.level +
+    self.magic.level +
+    self.woodcutting.level +
+    self.alchemy.level +
+    self.mining.level +
+    self.slayer.level +
+    self.survivalist.level
+}
+```
+
+**Max Total Level**: 99 × 15 = **1,485**
+
+<Note>
+Total level is used for leaderboards. The top 2 players display gold and silver trophy icons above their heads.
+</Note>
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Combat System" icon="crossed-swords" href="/features/combat">
+    Combat mechanics and damage calculation
+  </Card>
+  <Card title="Items & Equipment" icon="shield" href="/features/items">
+    Equipment bonuses and stat boosts
+  </Card>
+</CardGroup>

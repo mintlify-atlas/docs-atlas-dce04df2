@@ -1,0 +1,466 @@
+---
+title: 'Player'
+description: 'Player entity state and character management'
+---
+
+## Overview
+
+The `Player` struct represents a connected player character with all their stats, inventory, equipment, skills, and current state. Players are managed by the GameRoom and persist to the database.
+
+## Struct Definition
+
+```rust
+pub struct Player {
+    pub id: String,
+    pub name: String,
+    pub x: i32,
+    pub y: i32,
+    pub spawn_x: i32,
+    pub spawn_y: i32,
+    pub move_dx: i32,
+    pub move_dy: i32,
+    pub direction: Direction,
+    pub hp: i32,
+    pub skills: Skills,
+    pub combat_style: CombatStyle,
+    pub active: bool,
+    pub target_id: Option<String>,
+    pub last_attack_time: u64,
+    pub is_dead: bool,
+    pub inventory: Inventory,
+    // Character appearance
+    pub gender: String,
+    pub skin: String,
+    pub hair_style: Option<i32>,
+    pub hair_color: Option<i32>,
+    // Equipment slots
+    pub equipped_head: Option<String>,
+    pub equipped_body: Option<String>,
+    pub equipped_weapon: Option<String>,
+    pub equipped_back: Option<String>,
+    pub equipped_feet: Option<String>,
+    pub equipped_ring: Option<String>,
+    pub equipped_gloves: Option<String>,
+    pub equipped_necklace: Option<String>,
+    pub equipped_belt: Option<String>,
+    // Admin privileges
+    pub is_admin: bool,
+    pub is_god_mode: bool,
+    // Systems
+    pub prayer_points: i32,
+    pub active_prayers: HashSet<String>,
+    pub mp: i32,
+    pub spell_cooldowns: HashMap<String, u64>,
+    pub active_buffs: Vec<ActiveBuff>,
+    pub bank: Bank,
+    pub bank_max_slots: u32,
+    pub auto_action: Option<AutoAction>,
+    // ... more fields
+}
+```
+
+## Constants
+
+```rust
+const STARTING_HP: i32 = 100;
+const ATTACK_RANGE: i32 = 1;                 // Melee attack range in tiles
+const ATTACK_COOLDOWN_MS: u64 = 700;         // Melee cooldown
+const RANGED_ATTACK_COOLDOWN_MS: u64 = 1000; // Ranged cooldown
+const PLAYER_HP_REGEN_PERCENT: f32 = 2.0;    // 2% HP regen per interval
+const REGEN_INTERVAL_MS: u64 = 15000;        // Regen every 15 seconds
+const PLAYER_RESPAWN_TIME_MS: u64 = 5000;    // 5 second death timer
+```
+
+## Character Appearance
+
+<ParamField path="gender" type="String">
+  Character gender: `"male"` or `"female"`
+</ParamField>
+
+<ParamField path="skin" type="String">
+  Skin tone: `"tan"`, `"pale"`, `"brown"`, `"purple"`, `"orc"`, `"ghost"`, or `"skeleton"`
+</ParamField>
+
+<ParamField path="hair_style" type="Option<i32>">
+  Hair style index (0-5), or `None` for bald
+</ParamField>
+
+<ParamField path="hair_color" type="Option<i32>">
+  Hair color index (0-6), or `None` if no hair
+</ParamField>
+
+## Combat Styles
+
+```rust
+pub enum CombatStyle {
+    Accurate,    // +4 XP/damage to Attack (melee) or Ranged
+    Aggressive,  // +4 XP/damage to Strength
+    Defensive,   // +4 XP/damage to Defence
+    Controlled,  // +1.33 XP/damage to Attack, Strength, Defence
+    Rapid,       // +4 XP/damage to Ranged (faster attack speed)
+    Longrange,   // +2 XP/damage to Ranged, +2 XP/damage to Defence
+}
+```
+
+**Available Styles by Weapon Type:**
+- **Melee**: Accurate, Aggressive, Defensive, Controlled
+- **Ranged**: Accurate, Rapid, Longrange
+
+## Constructor
+
+```rust
+pub fn new(
+    id: &str,
+    name: &str,
+    spawn_x: i32,
+    spawn_y: i32,
+    gender: &str,
+    skin: &str,
+    hair_style: Option<i32>,
+    hair_color: Option<i32>,
+) -> Self
+```
+
+Creates a new player with default stats.
+
+<ParamField path="id" type="&str" required>
+  Unique player identifier (UUID)
+</ParamField>
+
+<ParamField path="name" type="&str" required>
+  Character display name
+</ParamField>
+
+<ParamField path="spawn_x" type="i32" required>
+  Initial X coordinate in world tiles
+</ParamField>
+
+<ParamField path="spawn_y" type="i32" required>
+  Initial Y coordinate in world tiles
+</ParamField>
+
+<ParamField path="gender" type="&str" required>
+  Character gender ("male" or "female")
+</ParamField>
+
+<ParamField path="skin" type="&str" required>
+  Skin tone selection
+</ParamField>
+
+**Default Starting Stats:**
+- HP: 10 (based on Hitpoints skill level)
+- Prayer Points: 11 (10 + Prayer level 1)
+- Mana Points: 12 (10 + Magic level 1 × 2)
+- All combat skills start at level 1
+- Hitpoints starts at level 10
+- Empty inventory (20 slots)
+- No equipped items
+
+## Health and Regeneration
+
+### max_hp()
+
+```rust
+pub fn max_hp(&self) -> i32
+```
+
+Returns the player's maximum HP based on Hitpoints skill level.
+
+<ResponseField name="max_hp" type="i32">
+  Maximum HP = Hitpoints skill level
+</ResponseField>
+
+---
+
+### apply_regen()
+
+```rust
+pub fn apply_regen(&mut self, current_time: u64, hp_regen_multiplier: f32)
+```
+
+Applies passive HP regeneration if enough time has elapsed.
+
+<ParamField path="current_time" type="u64" required>
+  Current timestamp in milliseconds
+</ParamField>
+
+<ParamField path="hp_regen_multiplier" type="f32" required>
+  Regen multiplier from active prayers (e.g., 2.0 for Rapid Heal)
+</ParamField>
+
+**Regeneration Formula:**
+```rust
+let base_regen = (max_hp as f32 * 2.0 / 100.0).ceil().max(1.0);
+let regen = (base_regen * hp_regen_multiplier).ceil() as i32;
+```
+
+- Base regen: 2% of max HP every 15 seconds
+- Minimum 1 HP per regen tick
+- Affected by prayer bonuses
+
+## Combat and XP
+
+### award_combat_xp()
+
+```rust
+pub fn award_combat_xp(
+    &mut self,
+    damage: i32,
+    style: CombatStyle,
+    weapon_type: WeaponType,
+) -> Vec<(SkillType, i64, i64, i32, bool)>
+```
+
+Awards combat experience based on damage dealt and active combat style.
+
+<ParamField path="damage" type="i32" required>
+  Damage dealt to the target
+</ParamField>
+
+<ParamField path="style" type="CombatStyle" required>
+  Active combat style at time of attack
+</ParamField>
+
+<ParamField path="weapon_type" type="WeaponType" required>
+  Weapon type (Melee or Ranged)
+</ParamField>
+
+<ResponseField name="xp_results" type="Vec<(SkillType, i64, i64, i32, bool)>">
+  List of (skill_type, xp_gained, total_xp, new_level, leveled_up) tuples
+</ResponseField>
+
+**XP Distribution:**
+- **Accurate** (melee): 4 XP/damage to Attack
+- **Accurate** (ranged): 4 XP/damage to Ranged
+- **Aggressive**: 4 XP/damage to Strength
+- **Defensive**: 4 XP/damage to Defence
+- **Controlled**: 1.33 XP/damage to Attack, Strength, Defence
+- **Rapid**: 4 XP/damage to Ranged
+- **Longrange**: 2 XP/damage to Ranged, 2 XP/damage to Defence
+- **Hitpoints**: Always 1.33 XP/damage
+
+### Equipment Bonuses
+
+```rust
+pub fn attack_bonus(&self, item_registry: &ItemRegistry) -> i32
+pub fn strength_bonus(&self, item_registry: &ItemRegistry) -> i32
+pub fn defence_bonus(&self, item_registry: &ItemRegistry) -> i32
+pub fn magic_bonus(&self, item_registry: &ItemRegistry) -> i32
+```
+
+Calculate total stat bonuses from all equipped items plus active buffs.
+
+<ParamField path="item_registry" type="&ItemRegistry" required>
+  Item registry to look up equipment stats
+</ParamField>
+
+<ResponseField name="bonus" type="i32">
+  Total bonus from equipment + active buffs
+</ResponseField>
+
+**Calculation:**
+1. Sum bonuses from all 9 equipment slots (head, body, weapon, back, feet, ring, gloves, necklace, belt)
+2. Add bonuses from active temporary buffs (potions, etc.)
+
+## Death and Respawn
+
+### die()
+
+```rust
+pub fn die(&mut self, current_time: u64)
+```
+
+Kills the player.
+
+<ParamField path="current_time" type="u64" required>
+  Timestamp when death occurred
+</ParamField>
+
+**Effects:**
+- Sets `is_dead = true`
+- Sets `hp = 0`
+- Records `death_time` for respawn timer
+- Clears movement intent and target
+- Deactivates all active prayers
+
+---
+
+### ready_to_respawn()
+
+```rust
+pub fn ready_to_respawn(&self, current_time: u64) -> bool
+```
+
+Checks if the respawn timer has elapsed (5 seconds).
+
+<ResponseField name="ready" type="bool">
+  True if player can respawn
+</ResponseField>
+
+---
+
+### respawn()
+
+```rust
+pub fn respawn(&mut self) -> Option<(i32, i32)>
+```
+
+Respawns the player at world spawn.
+
+<ResponseField name="chair_coords" type="Option<(i32, i32)>">
+  Coordinates of chair player was sitting in (if any), so caller can free it
+</ResponseField>
+
+**Effects:**
+- Teleports to `(WORLD_SPAWN_X, WORLD_SPAWN_Y)` = (15, 4)
+- Restores HP, prayer points, and mana to maximum
+- Clears auto-action and target
+- Resets movement cooldown
+- Frees occupied chair
+
+## Buff System
+
+```rust
+pub struct ActiveBuff {
+    pub stat: String,     // "attack", "strength", "defence", "magic"
+    pub amount: i32,      // Bonus amount
+    pub expires_at: u64,  // Expiration timestamp in milliseconds
+}
+```
+
+### apply_buff()
+
+```rust
+pub fn apply_buff(
+    &mut self,
+    stat: String,
+    amount: i32,
+    duration_ms: u64,
+    current_time_ms: u64,
+)
+```
+
+Applies a temporary stat buff (potions, etc.).
+
+<ParamField path="stat" type="String" required>
+  Stat to boost: "attack", "strength", "defence", or "magic"
+</ParamField>
+
+<ParamField path="amount" type="i32" required>
+  Bonus amount to add
+</ParamField>
+
+<ParamField path="duration_ms" type="u64" required>
+  Buff duration in milliseconds
+</ParamField>
+
+**Note:** Buffs do not stack. Applying a buff to a stat replaces any existing buff for that stat.
+
+---
+
+### tick_buffs()
+
+```rust
+pub fn tick_buffs(&mut self, current_time_ms: u64) -> bool
+```
+
+Removes expired buffs. Returns true if any were removed.
+
+## Auto-Actions
+
+```rust
+pub struct AutoAction {
+    pub target: AutoActionTarget,
+    pub action: AutoActionType,
+    pub started_at: u64,
+}
+
+pub enum AutoActionType {
+    Attack,  // Auto-attack target
+    Mine,    // Auto-mine ore
+    Chop,    // Auto-chop tree
+}
+```
+
+Players can set one auto-action that repeats every tick:
+- When in range and cooldown ready, action executes automatically
+- Cleared on death, teleport, or manual stop
+- OSRS-style click-to-act gameplay
+
+## Database Persistence
+
+```rust
+pub struct PlayerSaveData {
+    pub x: f32,
+    pub y: f32,
+    pub hp: i32,
+    pub prayer_points: i32,
+    pub mp: i32,
+    pub skills: Skills,
+    pub gold: i32,
+    pub inventory_json: String,
+    pub gender: String,
+    pub skin: String,
+    pub equipped_head: Option<String>,
+    pub equipped_body: Option<String>,
+    pub equipped_weapon: Option<String>,
+    pub equipped_back: Option<String>,
+    pub equipped_feet: Option<String>,
+    pub equipped_ring: Option<String>,
+    pub equipped_gloves: Option<String>,
+    pub equipped_necklace: Option<String>,
+    pub equipped_belt: Option<String>,
+    pub current_map: Option<String>,
+    pub bank_json: String,
+    pub bank_gold: i32,
+    pub bank_max_slots: u32,
+}
+```
+
+Player state is saved to the database periodically and on logout.
+
+## Example Usage
+
+```rust
+// Create new player
+let mut player = Player::new(
+    "550e8400-e29b-41d4-a716-446655440000",
+    "Steve",
+    15,
+    4,
+    "male",
+    "tan",
+    Some(2),
+    Some(4),
+);
+
+// Award combat XP
+let xp_results = player.award_combat_xp(
+    25,
+    CombatStyle::Aggressive,
+    WeaponType::Melee,
+);
+for (skill, xp, total, level, leveled) in xp_results {
+    if leveled {
+        println!("{} leveled up to {}!", skill.as_str(), level);
+    }
+}
+
+// Apply a strength potion buff
+player.apply_buff(
+    "strength".to_string(),
+    10,
+    300_000, // 5 minutes
+    current_time,
+);
+
+// Check max HP
+let max = player.max_hp();
+println!("Max HP: {}", max);
+```
+
+## Related Types
+
+- [GameRoom](/api/server/game-room) - Server game loop
+- [Items](/api/server/items) - Inventory system
+- [Database](/api/server/database) - Character persistence

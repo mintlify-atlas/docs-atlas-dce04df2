@@ -1,0 +1,491 @@
+---
+title: 'NPC'
+description: 'NPC entity and AI state machine'
+---
+
+## Overview
+
+The `Npc` struct represents a non-player character entity with AI behavior. NPCs can be hostile enemies, friendly quest givers, merchants, or passive creatures. They use a finite state machine for combat AI and wandering behavior.
+
+## Struct Definition
+
+```rust
+pub struct Npc {
+    pub id: String,
+    pub prototype_id: String,
+    pub stats: PrototypeStats,
+    pub x: i32,
+    pub y: i32,
+    pub spawn_x: i32,
+    pub spawn_y: i32,
+    pub direction: Direction,
+    pub spawn_direction: Direction,
+    pub hp: i32,
+    pub max_hp: i32,
+    pub level: i32,
+    pub state: NpcState,
+    pub target_id: Option<String>,
+    pub last_attack_time: u64,
+    pub last_move_time: u64,
+    pub death_time: u64,
+    pub just_attacked: bool,
+    pub wander_target: Option<(i32, i32)>,
+    pub idle_until: u64,
+    pub last_regen_time: u64,
+    pub speech_messages: Option<Vec<String>>,
+    pub speech_radius: i32,
+    pub next_speech_at: u64,
+}
+```
+
+## NPC State Machine
+
+```rust
+pub enum NpcState {
+    Idle,       // Standing still, looking for players
+    Chasing,    // Moving toward target player
+    Attacking,  // In range of target, attacking
+    Returning,  // Moving back to spawn point
+    Dead,       // Dead, waiting to respawn
+    Wandering,  // Random walk within wander_radius
+}
+```
+
+### State Transitions
+
+**Idle → Chasing:**
+- Hostile NPC detects player within aggro_range
+
+**Idle → Wandering:**
+- Wander enabled and idle_until timer expired
+- Picks random walkable target within wander_radius of spawn
+
+**Chasing → Attacking:**
+- Target is within attack_range (cardinal direction only)
+- Movement cooldown complete
+
+**Chasing → Returning:**
+- NPC moved too far from spawn (> chase_range)
+- Target moved too far away (> chase_range)
+- Target died or disconnected
+
+**Attacking → Chasing:**
+- Target moved out of attack_range or not in cardinal direction
+
+**Returning → Idle:**
+- NPC reached spawn point
+
+**Wandering → Idle:**
+- Reached wander target
+- Stuck for 4+ moves without progress
+
+**Wandering → Chasing:**
+- Hostile NPC detects player within aggro_range (interrupts wandering)
+
+## Prototype Stats
+
+```rust
+pub struct PrototypeStats {
+    pub display_name: String,
+    pub sprite: String,
+    pub damage: i32,
+    pub attack_bonus: i32,
+    pub defence_bonus: i32,
+    pub attack_range: i32,
+    pub aggro_range: i32,
+    pub chase_range: i32,
+    pub move_cooldown_ms: u64,
+    pub attack_cooldown_ms: u64,
+    pub respawn_time_ms: u64,
+    pub exp_base: i32,
+    pub hostile: bool,
+    pub is_quest_giver: bool,
+    pub is_merchant: bool,
+    pub is_altar: bool,
+    pub is_banker: bool,
+    pub is_slayer_master: bool,
+    pub is_friendly: bool,
+    pub wander_enabled: bool,
+    pub wander_radius: i32,
+    pub wander_pause_min_ms: u64,
+    pub wander_pause_max_ms: u64,
+    pub hp_regen_percent_per_sec: f32,
+    pub station_type: Option<String>,
+}
+```
+
+## Level Scaling
+
+NPC stats scale with their level:
+
+```rust
+// HP scaling: +10% per level above 1
+fn scale_hp(base_hp: i32, level: i32) -> i32 {
+    let multiplier = 1.0 + 0.10 * (level - 1).max(0) as f64;
+    (base_hp as f64 * multiplier).round() as i32
+}
+
+// Damage scaling: +15% per level above 1
+fn scale_damage(base_damage: i32, level: i32) -> i32 {
+    let multiplier = 1.0 + 0.15 * (level - 1).max(0) as f64;
+    (base_damage as f64 * multiplier).round() as i32
+}
+```
+
+**Example:**
+- Level 1 Pig: 50 HP, 5 damage
+- Level 5 Pig: 70 HP (~50 × 1.4), 8 damage (~5 × 1.6)
+
+## Constructor
+
+```rust
+pub fn from_prototype(
+    id: &str,
+    prototype_id: &str,
+    prototype: &EntityPrototype,
+    x: i32,
+    y: i32,
+    level: i32,
+    facing_override: Option<&str>,
+) -> Self
+```
+
+Creates an NPC instance from an entity prototype definition.
+
+<ParamField path="id" type="&str" required>
+  Unique NPC instance ID (e.g., "npc_0", "goblin_west_1")
+</ParamField>
+
+<ParamField path="prototype_id" type="&str" required>
+  Entity prototype ID (e.g., "pig", "goblin", "elder_villager")
+</ParamField>
+
+<ParamField path="prototype" type="&EntityPrototype" required>
+  Entity definition containing stats and behaviors
+</ParamField>
+
+<ParamField path="x" type="i32" required>
+  Spawn X coordinate in world tiles
+</ParamField>
+
+<ParamField path="y" type="i32" required>
+  Spawn Y coordinate in world tiles
+</ParamField>
+
+<ParamField path="level" type="i32" required>
+  NPC level (scales HP and damage)
+</ParamField>
+
+<ParamField path="facing_override" type="Option<&str>">
+  Optional facing direction override (e.g., "down", "left")
+</ParamField>
+
+## AI Update Loop
+
+```rust
+pub fn update(
+    &mut self,
+    _delta: f32,
+    players: &[(String, i32, i32, i32)],
+    other_npc_positions: &HashSet<(i32, i32)>,
+    current_time: u64,
+    walkable_check: &dyn Fn(i32, i32) -> bool,
+) -> Option<(String, i32)>
+```
+
+Updates NPC AI for one tick. Returns `Some((target_id, damage))` if the NPC attacks.
+
+<ParamField path="players" type="&[(String, i32, i32, i32)]" required>
+  List of (player_id, x, y, hp) for all players in range
+</ParamField>
+
+<ParamField path="other_npc_positions" type="&HashSet<(i32, i32)>" required>
+  Occupied tile positions for collision avoidance
+</ParamField>
+
+<ParamField path="current_time" type="u64" required>
+  Current timestamp in milliseconds
+</ParamField>
+
+<ParamField path="walkable_check" type="&dyn Fn(i32, i32) -> bool" required>
+  Callback to check if a tile is walkable (no collision)
+</ParamField>
+
+<ResponseField name="attack" type="Option<(String, i32)>">
+  If NPC attacks this tick, returns (target_player_id, damage)
+</ResponseField>
+
+### AI Behavior Details
+
+**Idle State:**
+1. If hostile and player in aggro_range → Chasing
+2. If wander enabled and idle_until expired → Wandering
+
+**Wandering State:**
+1. If hostile and player in aggro_range → Chasing (interrupt)
+2. Move toward wander_target
+3. If reached target → Idle with random pause
+4. If stuck (4 moves without progress) → Idle
+
+**Chasing State:**
+1. Check target still alive and in range
+2. If too far from spawn or target → Returning
+3. If in attack_range (cardinal only) and cooldown ready → Attacking
+4. Otherwise, move toward target (one tile at a time)
+
+**Attacking State:**
+1. Face target
+2. If movement and attack cooldowns ready → Deal damage
+3. If target out of range → Chasing
+4. If target lost → Returning
+
+**Returning State:**
+1. Move toward spawn point
+2. If reached spawn → Idle
+
+## Combat Methods
+
+### take_damage()
+
+```rust
+pub fn take_damage(
+    &mut self,
+    damage: i32,
+    current_time: u64,
+    attacker_id: Option<&str>,
+) -> bool
+```
+
+Damages the NPC. Returns true if NPC died.
+
+<ParamField path="damage" type="i32" required>
+  Damage to deal
+</ParamField>
+
+<ParamField path="current_time" type="u64" required>
+  Current timestamp
+</ParamField>
+
+<ParamField path="attacker_id" type="Option<&str>">
+  ID of attacking player (NPC will start chasing if survives)
+</ParamField>
+
+<ResponseField name="died" type="bool">
+  True if NPC HP reached 0
+</ResponseField>
+
+**Side Effects:**
+- If NPC survives and is attackable, starts chasing attacker
+- Interrupts wandering behavior
+
+## Respawn System
+
+### ready_to_respawn()
+
+```rust
+pub fn ready_to_respawn(&self, current_time: u64) -> bool
+```
+
+Checks if respawn timer has elapsed.
+
+<ResponseField name="ready" type="bool">
+  True if NPC can respawn (respawn_time_ms elapsed since death)
+</ResponseField>
+
+**Note:** NPCs with `respawn_time_ms = 0` never respawn (quest bosses, etc.).
+
+---
+
+### respawn()
+
+```rust
+pub fn respawn(&mut self)
+```
+
+Respawns the NPC at its spawn point.
+
+**Effects:**
+- Teleports to (spawn_x, spawn_y)
+- Restores HP to max_hp
+- Sets state to Idle
+- Resets facing to spawn_direction
+- Clears target and wander state
+
+## HP Regeneration
+
+```rust
+pub fn apply_regen(&mut self, current_time: u64)
+```
+
+Applies passive HP regeneration (30 second interval).
+
+<ParamField path="current_time" type="u64" required>
+  Current timestamp in milliseconds
+</ParamField>
+
+**Regeneration:**
+- Interval: 30 seconds
+- Amount: `hp_regen_percent_per_sec` from prototype stats
+- Minimum 1 HP per tick
+
+## NPC Types
+
+### Hostile NPCs
+
+```rust
+pub fn is_hostile(&self) -> bool
+```
+
+- Aggro on players within aggro_range
+- Chase and attack until out of range
+- Drop loot on death
+- Award combat XP
+
+### Quest Givers
+
+```rust
+pub fn is_quest_giver(&self) -> bool
+```
+
+- Show quest indicator (!) above head
+- Cannot be attacked
+- Dialog interaction for quest start/turn-in
+
+### Merchants
+
+```rust
+pub fn is_merchant(&self) -> bool
+```
+
+- Show shop indicator above head
+- Cannot be attacked
+- Open shop UI on interaction
+
+### Altars
+
+```rust
+pub fn is_altar(&self) -> bool
+```
+
+- Restore prayer points on interaction
+- Cannot be attacked
+
+### Bankers
+
+```rust
+pub fn is_banker(&self) -> bool
+```
+
+- Open bank vault UI on interaction
+- Cannot be attacked
+
+### Attackable Check
+
+```rust
+pub fn is_attackable(&self) -> bool
+```
+
+Returns false for:
+- Friendly NPCs
+- Quest givers
+- Merchants
+- Altars
+- Bankers
+- Slayer masters
+- Crafting stations
+
+## Network Update
+
+```rust
+pub struct NpcUpdate {
+    pub id: String,
+    pub entity_type: String,
+    pub prototype_id: String,
+    pub display_name: String,
+    pub x: i32,
+    pub y: i32,
+    pub direction: u8,
+    pub hp: i32,
+    pub max_hp: i32,
+    pub level: i32,
+    pub state: u8,
+    pub hostile: bool,
+    pub is_quest_giver: bool,
+    pub can_turn_in_quest: bool,
+    pub is_merchant: bool,
+    pub is_altar: bool,
+    pub is_banker: bool,
+    pub move_speed: f32,
+    pub just_attacked: bool,
+    pub station_type: Option<String>,
+}
+```
+
+Serialized NPC state sent to clients for rendering.
+
+**move_speed calculation:**
+```rust
+let move_speed = if move_cooldown_ms > 0 {
+    1000.0 / move_cooldown_ms as f32  // tiles per second
+} else {
+    0.0  // Stationary NPCs
+};
+```
+
+## Example Usage
+
+```rust
+use std::collections::HashSet;
+
+// Create NPC from prototype
+let pig = Npc::from_prototype(
+    "pig_001",
+    "pig",
+    &pig_prototype,
+    100,
+    50,
+    5,      // Level 5
+    Some("down"),
+);
+
+// Main game loop
+loop {
+    let current_time = get_current_time_ms();
+    
+    // Collect nearby players
+    let players = vec![
+        ("player_1".to_string(), 102, 52, 80),
+        ("player_2".to_string(), 95, 48, 100),
+    ];
+    
+    // Get occupied tiles for collision
+    let mut occupied = HashSet::new();
+    occupied.insert((101, 51));
+    
+    // Update AI
+    if let Some((target_id, damage)) = pig.update(
+        0.05,
+        &players,
+        &occupied,
+        current_time,
+        &|x, y| is_tile_walkable(x, y),
+    ) {
+        println!("Pig attacks {} for {} damage!", target_id, damage);
+    }
+    
+    // Apply HP regen
+    pig.apply_regen(current_time);
+    
+    // Check respawn
+    if pig.state == NpcState::Dead && pig.ready_to_respawn(current_time) {
+        pig.respawn();
+        println!("Pig respawned!");
+    }
+}
+```
+
+## Related Types
+
+- [GameRoom](/api/server/game-room) - NPC management and tick loop
+- [Player](/api/server/player) - Player targets for AI
+- [Items](/api/server/items) - NPC loot drops

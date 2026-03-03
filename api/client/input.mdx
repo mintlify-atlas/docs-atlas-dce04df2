@@ -1,0 +1,327 @@
+---
+title: InputHandler
+description: Input processing for keyboard, mouse, and touch controls
+---
+
+## Overview
+
+The `InputHandler` processes player input from keyboard, mouse, and touch controls, converting them into game commands. It manages click-to-move pathfinding, auto-actions, and UI interactions.
+
+## InputHandler
+
+Main input processing system.
+
+### Methods
+
+<ParamField path="process_input(state, audio)" type="Vec<InputCommand>">
+  Process all input for the current frame and return commands to execute
+  
+  <ParamField path="state" type="&mut GameState" required>
+    Game state (updated with path state, auto-actions, etc.)
+  </ParamField>
+  
+  <ParamField path="audio" type="&mut AudioManager" required>
+    Audio manager for UI sound effects
+  </ParamField>
+  
+  Returns a list of `InputCommand` to send to the server.
+</ParamField>
+
+## InputCommand
+
+Commands generated from input and sent to the server.
+
+### Movement Commands
+
+<ParamField path="Move" type="{ dx: f32, dy: f32 }">
+  Move in a direction (-1.0 to 1.0 per axis, normalized for diagonal)
+</ParamField>
+
+<ParamField path="Face" type="{ direction: u8 }">
+  Turn to face a direction (0=Down, 1=Left, 2=Up, 3=Right, 4-7=Diagonals)
+</ParamField>
+
+### Combat Commands
+
+<ParamField path="Attack">
+  Attack the current target
+</ParamField>
+
+<ParamField path="Target" type="{ entity_id: String }">
+  Set attack target to entity
+</ParamField>
+
+<ParamField path="ClearTarget">
+  Clear current attack target
+</ParamField>
+
+<ParamField path="StartAutoAction" type="{ target_type: String, target_id: String, action: String }">
+  Start auto-action (attack, chop, mine, etc.)
+  
+  - `target_type`: "npc", "player", "resource"
+  - `action`: "attack", "chop", "mine"
+</ParamField>
+
+<ParamField path="CancelAutoAction">
+  Cancel current auto-action
+</ParamField>
+
+### Item Commands
+
+<ParamField path="Pickup" type="{ item_id: String }">
+  Pick up a ground item
+</ParamField>
+
+<ParamField path="UseItem" type="{ slot_index: u8 }">
+  Use/consume an item from inventory (0-27)
+</ParamField>
+
+<ParamField path="DropItem" type="{ slot_index: u8, quantity: u32, target_x: Option<i32>, target_y: Option<i32> }">
+  Drop an item from inventory
+</ParamField>
+
+<ParamField path="Equip" type="{ slot_index: u8 }">
+  Equip an item from inventory
+</ParamField>
+
+<ParamField path="Unequip" type="{ slot_type: String, target_slot: Option<u8> }">
+  Unequip an item to inventory slot
+</ParamField>
+
+<ParamField path="SwapSlots" type="{ from_slot: u8, to_slot: u8 }">
+  Swap two inventory slots
+</ParamField>
+
+### Interaction Commands
+
+<ParamField path="Interact" type="{ npc_id: String }">
+  Talk to an NPC
+</ParamField>
+
+<ParamField path="DialogueChoice" type="{ quest_id: String, choice_id: String }">
+  Select a dialogue option
+</ParamField>
+
+<ParamField path="CloseDialogue">
+  Close active dialogue
+</ParamField>
+
+### Skill Commands
+
+<ParamField path="ChopTree" type="{ tree_x: i32, tree_y: i32, tree_gid: u32 }">
+  Start woodcutting at tile
+</ParamField>
+
+<ParamField path="MineRock" type="{ rock_x: i32, rock_y: i32, rock_gid: u32 }">
+  Start mining at tile
+</ParamField>
+
+<ParamField path="StartGathering" type="{ marker_x: i32, marker_y: i32 }">
+  Start fishing/gathering at marker
+</ParamField>
+
+<ParamField path="StopGathering">
+  Stop current gathering action
+</ParamField>
+
+<ParamField path="PlantSeed" type="{ patch_id: String, item_id: String }">
+  Plant a seed in farming patch
+</ParamField>
+
+<ParamField path="HarvestCrop" type="{ patch_id: String }">
+  Harvest a farming patch
+</ParamField>
+
+### Shop Commands
+
+<ParamField path="ShopBuy" type="{ npc_id: String, item_id: String, quantity: u32 }">
+  Buy items from shop
+</ParamField>
+
+<ParamField path="ShopSell" type="{ npc_id: String, item_id: String, quantity: u32 }">
+  Sell items to shop
+</ParamField>
+
+### Bank Commands
+
+<ParamField path="BankDeposit" type="{ item_id: String, quantity: i32 }">
+  Deposit items to bank
+</ParamField>
+
+<ParamField path="BankWithdraw" type="{ item_id: String, quantity: i32 }">
+  Withdraw items from bank
+</ParamField>
+
+<ParamField path="BankDepositGold" type="{ amount: i32 }">
+  Deposit gold to bank
+</ParamField>
+
+<ParamField path="BankWithdrawGold" type="{ amount: i32 }">
+  Withdraw gold from bank
+</ParamField>
+
+<ParamField path="BankDepositAll">
+  Deposit all inventory items
+</ParamField>
+
+### Combat System Commands
+
+<ParamField path="CastSpell" type="{ spell_id: String }">
+  Cast a spell
+</ParamField>
+
+<ParamField path="TogglePrayer" type="{ prayer_id: String }">
+  Activate/deactivate a prayer
+</ParamField>
+
+<ParamField path="BuryBones" type="{ slot: u8 }">
+  Bury bones for Prayer XP
+</ParamField>
+
+### Chat Commands
+
+<ParamField path="Chat" type="{ text: String, channel: String }">
+  Send a chat message (channel: "public" or "global")
+</ParamField>
+
+## TouchControls
+
+Mobile touch input handling.
+
+### Fields
+
+<ParamField path="dpad" type="VirtualDPad">
+  Virtual directional pad for movement
+</ParamField>
+
+<ParamField path="action_button" type="TouchButton">
+  Primary action button (attack, interact)
+</ParamField>
+
+### Methods
+
+<ParamField path="update(touches)" type="bool">
+  Update touch controls and return if input was consumed
+  
+  <ParamField path="touches" type="&[Touch]" required>
+    Current frame's touch events
+  </ParamField>
+</ParamField>
+
+<ParamField path="get_movement()" type="Option<(f32, f32)>">
+  Get current movement direction from D-pad (if any)
+</ParamField>
+
+<ParamField path="is_action_pressed()" type="bool">
+  Check if action button is pressed this frame
+</ParamField>
+
+## Pathfinding
+
+The input handler includes automatic pathfinding for click-to-move:
+
+### Auto-Pathing
+
+<ParamField path="auto_path" type="Option<PathState>">
+  Current active path (stored in GameState)
+  
+  Contains:
+  - `path`: Vec of (x, y) tiles to follow
+  - `current_index`: Progress through path
+  - `destination`: Final destination
+  - `pickup_target`: Item to pick up at end
+  - `interact_target`: NPC to talk to at end
+</ParamField>
+
+### Path Rebuilding
+
+Paths are automatically rebuilt when:
+- An entity moves (NPC, other player)
+- A tile becomes blocked/unblocked
+- An auto-action target moves
+
+The system uses "optimistic splice" to preserve already-committed movement:
+
+```rust
+// Reuses first 1-6 tiles of old path if they're still valid
+find_path_with_optimistic_splice(start, goal, occupied, max_distance)
+```
+
+## Keyboard Bindings
+
+### Movement (Modern Controls)
+
+- **W/A/S/D** - Move up/left/down/right
+- **Space** - Dash ability
+
+### Movement (Classic Controls)
+
+- **Arrow Keys** - Move in 4 directions
+- **Ctrl** - Attack/interact
+
+### Actions
+
+- **Left Click** - Move, interact, attack (context-sensitive)
+- **Right Click** - Open context menu
+- **Shift + Click** - Drop item (if enabled)
+- **1-9** - Hotkey slots
+
+### UI
+
+- **Enter** - Open chat (modern) or send message (classic)
+- **Escape** - Close panels
+- **I** - Toggle inventory
+- **C** - Toggle character panel
+- **P** - Toggle prayer/spell book
+
+## Example Usage
+
+```rust
+use aeven_client::input::InputHandler;
+
+let mut input_handler = InputHandler::new();
+
+// Process input each frame
+let commands = input_handler.process_input(&mut game_state, &mut audio);
+
+// Send commands to server
+for command in commands {
+    match command {
+        InputCommand::Move { dx, dy } => {
+            network.send(&ClientMessage::Move { dx, dy, seq: 0 });
+        }
+        InputCommand::Attack => {
+            network.send(&ClientMessage::Attack);
+        }
+        InputCommand::Chat { text, channel } => {
+            network.send(&ClientMessage::Chat { text, channel });
+        }
+        _ => {}
+    }
+}
+```
+
+## Auto-Action System
+
+The auto-action system provides OSRS-style click-to-act behavior:
+
+1. **Click entity** → Pathfind to range → Start action when in range
+2. **Entity moves** → Update path to follow
+3. **Action completes** → Continue if entity still valid
+4. **Target dies/despawns** → Cancel action
+
+```rust
+// Stored in GameState
+pub struct AutoActionState {
+    pub target_type: String,  // "npc", "player", "resource"
+    pub target_id: String,    // Entity ID or "x,y,gid"
+    pub action: String,       // "attack", "chop", "mine"
+    pub confirmed: bool,      // Server acknowledged
+}
+```
+
+## Related
+
+- [NetworkClient](/api/client/network) - Sends input commands to server
+- [GameState](/api/client/game-state) - Updated by input processing
+- [TouchControls](/api/client/input#touchcontrols) - Mobile input handling

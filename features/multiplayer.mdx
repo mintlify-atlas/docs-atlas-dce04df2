@@ -1,0 +1,247 @@
+---
+title: Multiplayer
+description: Real-time networking and multiplayer gameplay in Aeven
+---
+
+Aeven is built from the ground up as a massively multiplayer online game, supporting 10-50+ concurrent players in a shared world with real-time synchronization.
+
+## Architecture
+
+### Client-Server Model
+
+The game uses a **server-authoritative** architecture where the Rust server validates all actions and broadcasts state updates to connected clients.
+
+- **Client**: Rust + macroquad (native + WASM)
+- **Server**: Rust + axum (WebSocket + HTTP)
+- **Protocol**: MessagePack for efficient binary serialization
+- **Tick Rate**: 20 Hz server tick, 60 fps client rendering
+
+### WebSocket Communication
+
+All real-time gameplay happens over WebSocket connections:
+
+```rust
+// Server broadcasts state updates to all players
+broadcast_tx.send(state_sync_msg)?;
+
+// Per-player unicast for private data (inventory, quests)
+player_sender.send(inventory_update_msg).await?;
+```
+
+**Connection Flow**:
+1. Client connects via WebSocket to `ws://localhost:2567`
+2. Server sends initial state sync with all nearby players and NPCs
+3. Client sends movement/action commands
+4. Server validates and broadcasts state changes
+
+## Real-Time Gameplay
+
+### Server Tick Loop (20 Hz)
+
+The server runs a continuous game loop at 20 ticks per second:
+
+```rust
+// From rust-server/src/game.rs
+const TICK_RATE: f32 = 20.0;
+
+1. Process incoming client commands
+2. Validate and apply grid movement (250ms cooldown)
+3. Run NPC AI (aggro, chase, attack, return)
+4. Process combat (damage, death, respawn)
+5. Update items (drops, pickups, despawns)
+6. Broadcast state sync to all clients
+```
+
+### Client Rendering (60 fps)
+
+Clients render at 60 fps with smooth interpolation:
+
+```rust
+1. Poll network messages (state sync from server)
+2. Handle input (WASD, Space, mouse, keys)
+3. Send commands to server (move, attack, chat, pickup, use item)
+4. Update state:
+   - All entities: smooth interpolation toward server grid positions
+5. Render (isometric depth sort, UI overlays)
+6. Debug overlay (FPS, player count, connection status)
+```
+
+### Grid-Based Movement
+
+Movement is **grid-based** with smooth visual interpolation:
+
+- **Server**: Players move in whole tiles only (grid positions)
+- **Client**: Smoothly animates between grid positions at 60 fps
+- **Player speed**: 4 tiles/sec (250ms per tile)
+- **NPC speed**: 2 tiles/sec (500ms per tile)
+
+<CodeGroup>
+```rust Game Movement Constants
+// Grid-based movement: ticks between tile moves (5 ticks * 50ms = 250ms per tile)
+const MOVE_COOLDOWN_TICKS: u64 = 5;
+const TICK_RATE: f32 = 20.0;
+
+// Movement is cardinal-only (no diagonals for isometric grid)
+pub move_dx: i32,  // -1, 0, or 1
+pub move_dy: i32,  // -1, 0, or 1
+```
+
+```rust Server Validation
+// Server validates collision before applying movement
+if current_tick - player.last_move_tick >= MOVE_COOLDOWN_TICKS {
+    if !world.is_blocked(new_x, new_y) {
+        player.x = new_x;
+        player.y = new_y;
+        player.last_move_tick = current_tick;
+    }
+}
+```
+</CodeGroup>
+
+## State Synchronization
+
+### Delta Sync Optimization
+
+To reduce bandwidth, the server sends **delta updates** instead of full state:
+
+```rust
+// From rust-server/src/game.rs
+const FULL_SYNC_INTERVAL: u64 = 20; // Force full sync every 1 second
+const VIEW_DISTANCE: i32 = 40; // Only sync entities within 40 tiles
+
+// Track what each player last saw
+struct PlayerSyncState {
+    last_players: HashMap<String, PlayerUpdate>,
+    last_npcs: HashMap<String, NpcUpdate>,
+    last_full_sync_tick: u64,
+}
+```
+
+**Bandwidth Optimization**:
+- Only send entities within 40-tile view distance
+- Only send changed properties (position, HP, etc.)
+- Full sync every 1 second as fallback
+- Private data (inventory, quests) sent via unicast
+
+### Player Updates
+
+Each player update includes:
+
+```rust
+pub struct PlayerUpdate {
+    pub id: String,
+    pub name: String,
+    pub x: i32,  // Grid position
+    pub y: i32,
+    pub direction: u8,
+    pub vel_x: i32,  // Velocity for client prediction
+    pub vel_y: i32,
+    pub hp: i32,
+    pub max_hp: i32,
+    pub combat_level: i32,
+    pub gold: i32,
+    pub equipped_weapon: Option<String>,
+    pub equipped_body: Option<String>,
+    // ... character appearance, equipment, etc.
+}
+```
+
+### NPC Updates
+
+NPC state includes AI behavior signals:
+
+```rust
+pub struct NpcUpdate {
+    pub id: String,
+    pub entity_type: String,  // Sprite name
+    pub display_name: String,
+    pub x: i32,
+    pub y: i32,
+    pub direction: u8,
+    pub hp: i32,
+    pub max_hp: i32,
+    pub level: i32,
+    pub state: u8,  // Idle/Chasing/Attacking/Returning/Dead
+    pub hostile: bool,
+    pub just_attacked: bool,  // Animation sync
+    pub move_speed: f32,  // Tiles per second
+}
+```
+
+## Player Join/Leave
+
+### Connection
+
+```rust
+// Player connects
+1. WebSocket handshake
+2. Load player data from database (position, inventory, skills)
+3. Send initial StateSync with nearby players/NPCs
+4. Broadcast PlayerJoined to other players
+5. Start sending regular state updates
+```
+
+### Disconnection
+
+```rust
+// Player disconnects
+1. Mark player as inactive
+2. Save player state to database
+3. Broadcast PlayerLeft to other players
+4. Clean up player resources
+```
+
+## Scalability
+
+### Current Limits
+
+- **MVP Scope**: Single zone, 10-50 players
+- **Tick Rate**: 20 Hz (50ms per tick)
+- **View Distance**: 40 tiles (culled from state sync)
+- **Map Size**: Unlimited (chunk-based streaming)
+
+### Future Scaling
+
+<Note>
+The chunk-based world system is designed to support **horizontal scaling** across multiple server instances in the future, with each instance handling a subset of chunks.
+</Note>
+
+## Controls
+
+| Key | Action |
+|-----|--------|
+| WASD / Arrows | Move (cardinal directions) |
+| Space | Attack target |
+| Left Click | Target entity |
+| Escape | Clear target / Cancel chat |
+| Enter | Open/send chat |
+| I | Toggle inventory |
+| 1-5 | Use quick slot item |
+| F | Pickup nearest item |
+| F3 | Toggle debug info |
+
+## WASM Support
+
+<Warning>
+The WASM build currently runs in **offline demo mode** only. Networking is blocked due to a conflict between `ewebsock` and `miniquad`'s WASM loader.
+</Warning>
+
+**Current Status**:
+- ✅ WASM build compiles
+- ✅ Offline demo with local player
+- ❌ WebSocket networking (blocked by dependency conflict)
+
+**Planned**:
+- Find alternative to `ewebsock` for WASM networking
+- Full browser-based multiplayer support
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Combat System" icon="crossed-swords" href="/features/combat">
+    Real-time combat with attack cooldowns
+  </Card>
+  <Card title="World Streaming" icon="map" href="/features/world">
+    Chunk-based world loading
+  </Card>
+</CardGroup>

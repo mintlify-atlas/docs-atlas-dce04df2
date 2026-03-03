@@ -1,0 +1,819 @@
+---
+title: "Message Types"
+description: "Client and server message definitions using MessagePack serialization"
+---
+
+Aeven uses MessagePack for efficient binary serialization of messages between client and server. All messages follow a tagged enum structure with a `type` field for message identification.
+
+## Message Format
+
+Messages are encoded as MessagePack arrays in the Colyseus protocol format:
+
+```rust
+[protocol_code, message_type, message_data]
+```
+
+### Protocol Codes
+
+<ResponseField name="protocol_code" type="u8">
+  Colyseus protocol identifier
+  
+  - `9` - Handshake
+  - `11` - Error
+  - `13` - RoomData (standard game messages)
+  - `14` - RoomState (full state snapshot)
+  - `15` - RoomStatePatch (state delta)
+</ResponseField>
+
+### Compression
+
+Messages support optional deflate compression with a prefix byte:
+
+- `0x00` - Uncompressed MessagePack data follows
+- `0x01` - Deflate-compressed MessagePack data follows
+- Other - Legacy uncompressed (no prefix)
+
+See `client/src/network/protocol.rs:35` for decompression implementation.
+
+---
+
+## Client Messages
+
+Messages sent from client to server. All messages are variants of the `ClientMessage` enum with a `type` field for discrimination.
+
+### Movement
+
+<ResponseField name="move" type="object">
+  Move the player character
+  
+  <Expandable title="properties">
+    <ResponseField name="type" type="string" required>
+      Always `"move"`
+    </ResponseField>
+    <ResponseField name="dx" type="f32" required>
+      Delta X movement (-1.0 to 1.0)
+    </ResponseField>
+    <ResponseField name="dy" type="f32" required>
+      Delta Y movement (-1.0 to 1.0)
+    </ResponseField>
+    <ResponseField name="seq" type="u32">
+      Optional sequence number for client-side prediction acknowledgment
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="dash" type="object">
+  Perform a dash action
+  
+  <Expandable title="properties">
+    <ResponseField name="type" type="string" required>
+      Always `"dash"`
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="face" type="object">
+  Change player facing direction
+  
+  <Expandable title="properties">
+    <ResponseField name="type" type="string" required>
+      Always `"face"`
+    </ResponseField>
+    <ResponseField name="direction" type="u8" required>
+      Direction (0-7, where 0 is down, 2 is left, 4 is up, 6 is right)
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+### Combat
+
+<ResponseField name="attack" type="object">
+  Attack current target
+  
+  <Expandable title="properties">
+    <ResponseField name="type" type="string" required>
+      Always `"attack"`
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="target" type="object">
+  Set combat target
+  
+  <Expandable title="properties">
+    <ResponseField name="type" type="string" required>
+      Always `"target"`
+    </ResponseField>
+    <ResponseField name="entity_id" type="string" required>
+      Entity ID to target
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="castSpell" type="object">
+  Cast a spell
+  
+  <Expandable title="properties">
+    <ResponseField name="type" type="string" required>
+      Always `"castSpell"`
+    </ResponseField>
+    <ResponseField name="spell_id" type="string" required>
+      ID of spell to cast
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="setCombatStyle" type="object">
+  Set player combat style
+  
+  <Expandable title="properties">
+    <ResponseField name="type" type="string" required>
+      Always `"setCombatStyle"`
+    </ResponseField>
+    <ResponseField name="style" type="string" required>
+      Combat style: `"attack"`, `"strength"`, `"defence"`, or `"ranged"`
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+### Inventory & Items
+
+<ResponseField name="pickup" type="object">
+  Pick up ground item
+  
+  <Expandable title="properties">
+    <ResponseField name="type" type="string" required>
+      Always `"pickup"`
+    </ResponseField>
+    <ResponseField name="item_id" type="string" required>
+      Ground item ID
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="useItem" type="object">
+  Use consumable item from inventory
+  
+  <Expandable title="properties">
+    <ResponseField name="type" type="string" required>
+      Always `"useItem"`
+    </ResponseField>
+    <ResponseField name="slot_index" type="u8" required>
+      Inventory slot index (0-27)
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="dropItem" type="object">
+  Drop item from inventory
+  
+  <Expandable title="properties">
+    <ResponseField name="type" type="string" required>
+      Always `"dropItem"`
+    </ResponseField>
+    <ResponseField name="slot_index" type="u8" required>
+      Inventory slot index
+    </ResponseField>
+    <ResponseField name="quantity" type="u32" required>
+      Number of items to drop
+    </ResponseField>
+    <ResponseField name="target_x" type="i32">
+      Optional X coordinate to drop at
+    </ResponseField>
+    <ResponseField name="target_y" type="i32">
+      Optional Y coordinate to drop at
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="swapSlots" type="object">
+  Swap two inventory slots
+  
+  <Expandable title="properties">
+    <ResponseField name="type" type="string" required>
+      Always `"swapSlots"`
+    </ResponseField>
+    <ResponseField name="from_slot" type="u8" required>
+      Source slot index
+    </ResponseField>
+    <ResponseField name="to_slot" type="u8" required>
+      Destination slot index
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+### Equipment
+
+<ResponseField name="equip" type="object">
+  Equip item from inventory
+  
+  <Expandable title="properties">
+    <ResponseField name="type" type="string" required>
+      Always `"equip"`
+    </ResponseField>
+    <ResponseField name="slot_index" type="u8" required>
+      Inventory slot containing item to equip
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="unequip" type="object">
+  Unequip item to inventory
+  
+  <Expandable title="properties">
+    <ResponseField name="type" type="string" required>
+      Always `"unequip"`
+    </ResponseField>
+    <ResponseField name="slot_type" type="string" required>
+      Equipment slot: `"head"`, `"body"`, `"weapon"`, `"back"`, `"feet"`, `"ring"`, `"gloves"`, `"necklace"`, or `"belt"`
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+### Skills & Gathering
+
+<ResponseField name="chopTree" type="object">
+  Chop a tree for woodcutting XP
+  
+  <Expandable title="properties">
+    <ResponseField name="type" type="string" required>
+      Always `"chopTree"`
+    </ResponseField>
+    <ResponseField name="tree_x" type="i32" required>
+      Tree tile X coordinate
+    </ResponseField>
+    <ResponseField name="tree_y" type="i32" required>
+      Tree tile Y coordinate
+    </ResponseField>
+    <ResponseField name="tree_gid" type="u32" required>
+      Tree global tile ID
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="mineRock" type="object">
+  Mine a rock for mining XP
+  
+  <Expandable title="properties">
+    <ResponseField name="type" type="string" required>
+      Always `"mineRock"`
+    </ResponseField>
+    <ResponseField name="rock_x" type="i32" required>
+      Rock tile X coordinate
+    </ResponseField>
+    <ResponseField name="rock_y" type="i32" required>
+      Rock tile Y coordinate
+    </ResponseField>
+    <ResponseField name="rock_gid" type="u32" required>
+      Rock global tile ID
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="startGathering" type="object">
+  Begin gathering at a marker
+  
+  <Expandable title="properties">
+    <ResponseField name="type" type="string" required>
+      Always `"startGathering"`
+    </ResponseField>
+    <ResponseField name="marker_x" type="i32" required>
+      Marker X coordinate
+    </ResponseField>
+    <ResponseField name="marker_y" type="i32" required>
+      Marker Y coordinate
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="stopGathering" type="object">
+  Stop current gathering action
+  
+  <Expandable title="properties">
+    <ResponseField name="type" type="string" required>
+      Always `"stopGathering"`
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+### Crafting
+
+<ResponseField name="startCraft" type="object">
+  Start timed crafting
+  
+  <Expandable title="properties">
+    <ResponseField name="type" type="string" required>
+      Always `"startCraft"`
+    </ResponseField>
+    <ResponseField name="recipe_id" type="string" required>
+      Recipe ID to craft
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="startCraftBatch" type="object">
+  Start batch crafting (furnace smelting)
+  
+  <Expandable title="properties">
+    <ResponseField name="type" type="string" required>
+      Always `"startCraftBatch"`
+    </ResponseField>
+    <ResponseField name="recipe_id" type="string" required>
+      Recipe ID
+    </ResponseField>
+    <ResponseField name="quantity" type="u32" required>
+      Number of items to craft
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="cancelCraft" type="object">
+  Cancel active crafting
+  
+  <Expandable title="properties">
+    <ResponseField name="type" type="string" required>
+      Always `"cancelCraft"`
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+### Chat & Social
+
+<ResponseField name="chat" type="object">
+  Send chat message
+  
+  <Expandable title="properties">
+    <ResponseField name="type" type="string" required>
+      Always `"chat"`
+    </ResponseField>
+    <ResponseField name="text" type="string" required>
+      Message text
+    </ResponseField>
+    <ResponseField name="channel" type="string">
+      Channel name (default: general)
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="sendFriendRequest" type="object">
+  Send friend request
+  
+  <Expandable title="properties">
+    <ResponseField name="type" type="string" required>
+      Always `"sendFriendRequest"`
+    </ResponseField>
+    <ResponseField name="target_name" type="string" required>
+      Player name to add as friend
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="acceptFriendRequest" type="object">
+  Accept pending friend request
+  
+  <Expandable title="properties">
+    <ResponseField name="type" type="string" required>
+      Always `"acceptFriendRequest"`
+    </ResponseField>
+    <ResponseField name="requester_id" type="i64" required>
+      Character ID of requester
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+### Authentication
+
+<ResponseField name="auth" type="object">
+  Authenticate player (legacy)
+  
+  <Expandable title="properties">
+    <ResponseField name="type" type="string" required>
+      Always `"auth"`
+    </ResponseField>
+    <ResponseField name="username" type="string" required>
+      Username
+    </ResponseField>
+    <ResponseField name="password" type="string" required>
+      Password
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+### World
+
+<ResponseField name="requestChunk" type="object">
+  Request chunk data
+  
+  <Expandable title="properties">
+    <ResponseField name="type" type="string" required>
+      Always `"requestChunk"`
+    </ResponseField>
+    <ResponseField name="chunk_x" type="i32" required>
+      Chunk X coordinate
+    </ResponseField>
+    <ResponseField name="chunk_y" type="i32" required>
+      Chunk Y coordinate
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="ping" type="object">
+  Ping server for latency measurement
+  
+  <Expandable title="properties">
+    <ResponseField name="type" type="string" required>
+      Always `"ping"`
+    </ResponseField>
+    <ResponseField name="timestamp" type="f64" required>
+      Client timestamp in milliseconds
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+---
+
+## Server Messages
+
+Messages sent from server to client. All messages use the `ServerMessage` enum serialized as untagged structs.
+
+### Connection
+
+<ResponseField name="welcome" type="object">
+  Sent immediately after WebSocket connection
+  
+  <Expandable title="properties">
+    <ResponseField name="player_id" type="string" required>
+      Assigned player ID (format: `char_{character_id}`)
+    </ResponseField>
+    <ResponseField name="is_new_character" type="bool" required>
+      True if this is a new character (played_time == 0)
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="error" type="object">
+  Error notification
+  
+  <Expandable title="properties">
+    <ResponseField name="code" type="u32" required>
+      Error code
+    </ResponseField>
+    <ResponseField name="message" type="string" required>
+      Error message
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+### Player State
+
+<ResponseField name="stateSync" type="object">
+  Periodic state synchronization broadcast (60 ticks/sec)
+  
+  <Expandable title="properties">
+    <ResponseField name="tick" type="u64" required>
+      Server tick number
+    </ResponseField>
+    <ResponseField name="players" type="array" required>
+      Array of PlayerUpdate objects with position, velocity, HP, etc.
+    </ResponseField>
+    <ResponseField name="npcs" type="array" required>
+      Array of NpcUpdate objects
+    </ResponseField>
+    <ResponseField name="instance_id" type="string" required>
+      Instance identifier (empty string = overworld)
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="playerJoined" type="object">
+  Notification when player joins
+  
+  <Expandable title="properties">
+    <ResponseField name="id" type="string" required>
+      Player ID
+    </ResponseField>
+    <ResponseField name="name" type="string" required>
+      Character name
+    </ResponseField>
+    <ResponseField name="x" type="i32" required>
+      Spawn X position
+    </ResponseField>
+    <ResponseField name="y" type="i32" required>
+      Spawn Y position
+    </ResponseField>
+    <ResponseField name="gender" type="string" required>
+      Gender: `"male"` or `"female"`
+    </ResponseField>
+    <ResponseField name="skin" type="string" required>
+      Skin tone identifier
+    </ResponseField>
+    <ResponseField name="hair_style" type="i32">
+      Hair style ID
+    </ResponseField>
+    <ResponseField name="hair_color" type="i32">
+      Hair color ID
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="playerLeft" type="object">
+  Notification when player disconnects
+  
+  <Expandable title="properties">
+    <ResponseField name="id" type="string" required>
+      Player ID
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+### Combat
+
+<ResponseField name="damageEvent" type="object">
+  Damage dealt notification
+  
+  <Expandable title="properties">
+    <ResponseField name="source_id" type="string" required>
+      Attacker entity ID
+    </ResponseField>
+    <ResponseField name="target_id" type="string" required>
+      Target entity ID
+    </ResponseField>
+    <ResponseField name="damage" type="i32" required>
+      Damage amount
+    </ResponseField>
+    <ResponseField name="target_hp" type="i32" required>
+      Target's HP after damage
+    </ResponseField>
+    <ResponseField name="target_x" type="f32" required>
+      Target X position
+    </ResponseField>
+    <ResponseField name="target_y" type="f32" required>
+      Target Y position
+    </ResponseField>
+    <ResponseField name="projectile" type="string">
+      Projectile sprite ID (for ranged attacks)
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="playerAttack" type="object">
+  Player attack animation trigger
+  
+  <Expandable title="properties">
+    <ResponseField name="player_id" type="string" required>
+      Attacking player ID
+    </ResponseField>
+    <ResponseField name="attack_type" type="string" required>
+      Attack type: `"melee"`, `"ranged"`, or `"spell"`
+    </ResponseField>
+    <ResponseField name="direction" type="u8" required>
+      Attack direction
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="npcDied" type="object">
+  NPC death notification
+  
+  <Expandable title="properties">
+    <ResponseField name="id" type="string" required>
+      NPC ID
+    </ResponseField>
+    <ResponseField name="killer_id" type="string" required>
+      Player ID who killed the NPC
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+### Skills
+
+<ResponseField name="skillXp" type="object">
+  Skill XP gained notification
+  
+  <Expandable title="properties">
+    <ResponseField name="player_id" type="string" required>
+      Player ID
+    </ResponseField>
+    <ResponseField name="skill" type="string" required>
+      Skill name
+    </ResponseField>
+    <ResponseField name="xp_gained" type="i64" required>
+      XP amount gained
+    </ResponseField>
+    <ResponseField name="total_xp" type="i64" required>
+      New total XP
+    </ResponseField>
+    <ResponseField name="level" type="i32" required>
+      Current skill level
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="skillLevelUp" type="object">
+  Skill level up notification
+  
+  <Expandable title="properties">
+    <ResponseField name="player_id" type="string" required>
+      Player ID
+    </ResponseField>
+    <ResponseField name="skill" type="string" required>
+      Skill name
+    </ResponseField>
+    <ResponseField name="new_level" type="i32" required>
+      New level reached
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="skillsSync" type="object">
+  Full skill state synchronization (sent on connect)
+  
+  <Expandable title="properties">
+    <ResponseField name="player_id" type="string" required>
+      Player ID
+    </ResponseField>
+    <ResponseField name="hitpoints_level" type="i32" required>
+      Hitpoints level
+    </ResponseField>
+    <ResponseField name="hitpoints_xp" type="i64" required>
+      Hitpoints XP
+    </ResponseField>
+    <ResponseField name="attack_level" type="i32" required>
+      Attack level
+    </ResponseField>
+    <ResponseField name="attack_xp" type="i64" required>
+      Attack XP
+    </ResponseField>
+    <ResponseField name="strength_level" type="i32" required>
+      Strength level
+    </ResponseField>
+    <ResponseField name="strength_xp" type="i64" required>
+      Strength XP
+    </ResponseField>
+    <ResponseField name="..." type="...">
+      Additional skills follow the same pattern
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+### Inventory
+
+<ResponseField name="inventoryUpdate" type="object">
+  Inventory state update
+  
+  <Expandable title="properties">
+    <ResponseField name="player_id" type="string" required>
+      Player ID
+    </ResponseField>
+    <ResponseField name="slots" type="array" required>
+      Array of InventorySlotUpdate objects
+    </ResponseField>
+    <ResponseField name="gold" type="i32" required>
+      Current gold amount
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="itemDropped" type="object">
+  Item dropped to ground
+  
+  <Expandable title="properties">
+    <ResponseField name="id" type="string" required>
+      Ground item instance ID
+    </ResponseField>
+    <ResponseField name="item_id" type="string" required>
+      Item definition ID
+    </ResponseField>
+    <ResponseField name="x" type="f32" required>
+      X position
+    </ResponseField>
+    <ResponseField name="y" type="f32" required>
+      Y position
+    </ResponseField>
+    <ResponseField name="quantity" type="i32" required>
+      Stack size
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+### World
+
+<ResponseField name="chunkData" type="object">
+  Chunk tile data response
+  
+  <Expandable title="properties">
+    <ResponseField name="chunk_x" type="i32" required>
+      Chunk X coordinate
+    </ResponseField>
+    <ResponseField name="chunk_y" type="i32" required>
+      Chunk Y coordinate
+    </ResponseField>
+    <ResponseField name="layers" type="array" required>
+      Array of ChunkLayerData (ground, objects, overhead)
+    </ResponseField>
+    <ResponseField name="collision" type="array" required>
+      Packed collision bits
+    </ResponseField>
+    <ResponseField name="objects" type="array" required>
+      Array of ChunkObjectData (trees, rocks, decorations)
+    </ResponseField>
+    <ResponseField name="walls" type="array" required>
+      Array of ChunkWallData
+    </ResponseField>
+    <ResponseField name="portals" type="array" required>
+      Array of ChunkPortalData
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="pong" type="object">
+  Response to ping for latency calculation
+  
+  <Expandable title="properties">
+    <ResponseField name="timestamp" type="f64" required>
+      Echoed client timestamp
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+### Definitions
+
+<ResponseField name="entityDefinitions" type="object">
+  Entity registry (sent on connect)
+  
+  <Expandable title="properties">
+    <ResponseField name="entities" type="array" required>
+      Array of ClientEntityDef objects
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="itemDefinitions" type="object">
+  Item registry (sent on connect)
+  
+  <Expandable title="properties">
+    <ResponseField name="items" type="array" required>
+      Array of ClientItemDef objects
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="recipeDefinitions" type="object">
+  Recipe registry (sent on connect)
+  
+  <Expandable title="properties">
+    <ResponseField name="recipes" type="array" required>
+      Array of ClientRecipeDef objects
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+---
+
+## Example Messages
+
+### Client Move Message
+
+```json
+{
+  "type": "move",
+  "dx": 1.0,
+  "dy": 0.0,
+  "seq": 42
+}
+```
+
+Encoded as MessagePack (hex):
+```
+93 0D A4 6D 6F 76 65 83 A2 64 78 CB 3F F0 00 00 00 00 00 00
+A2 64 79 00 A3 73 65 71 2A
+```
+
+Breakdown:
+- `93` - Array with 3 elements
+- `0D` - Protocol code 13 (RoomData)
+- `A4 6D 6F 76 65` - String "move"
+- `83` - Map with 3 entries (dx, dy, seq)
+
+### Server Welcome Message
+
+```json
+{
+  "player_id": "char_12345",
+  "is_new_character": false
+}
+```
+
+Sent as MessagePack array:
+```
+[13, "welcome", {"player_id": "char_12345", "is_new_character": false}]
+```
+
+---
+
+## Source References
+
+- Message definitions: `rust-server/src/protocol.rs:10-1727`
+- Client encoding: `client/src/network/protocol.rs:20-29`
+- Server encoding: `rust-server/src/protocol.rs:1730-1900`
+- Message handler: `rust-server/src/main.rs:2904-3200`

@@ -1,80 +1,357 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: "Quickstart Guide"
+description: "Get Aeven running locally in under 5 minutes. Build the server, launch the client, and start playing."
 ---
 
-## Get started in three steps
+## Prerequisites
 
-Get your documentation site running locally and make your first customization.
-
-### Step 1: Set up your local environment
-
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
-
-### Step 2: Deploy your changes
-
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
-
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
-
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
-
-### Step 3: Go live
-
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
-
-## Next steps
-
-Now that you have your docs running, explore these key features:
+Before you begin, ensure you have the following installed:
 
 <CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
+  <Card title="Rust & Cargo" icon="rust">
+    Install from [rustup.rs](https://rustup.rs)
+    
+    ```bash
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+    ```
+  </Card>
+  <Card title="Git" icon="git-alt">
+    [Download Git](https://git-scm.com/downloads) for your platform
+  </Card>
 </CardGroup>
 
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>
+<Accordion title="Verify your installation">
+  ```bash
+  rustc --version
+  # rustc 1.80.0 (or later)
+  
+  cargo --version
+  # cargo 1.80.0 (or later)
+  
+  git --version
+  # git version 2.x.x
+  ```
+</Accordion>
+
+## Quick Start in 3 Steps
+
+<Steps>
+  <Step title="Clone the repository">
+    ```bash
+    git clone https://github.com/andrewrexo/isometric-game.git
+    cd isometric-game
+    ```
+  </Step>
+  
+  <Step title="Start the server">
+    Open a terminal and run:
+    
+    ```bash
+    cd rust-server
+    cargo run --release
+    ```
+    
+    <Note>
+      First build takes 2-5 minutes to compile dependencies. Subsequent builds are much faster.
+    </Note>
+    
+    You should see output like:
+    ```plaintext
+    [INFO] Server listening on http://localhost:2567
+    [INFO] Loaded 156 items from data/items.toml
+    [INFO] Loaded 42 NPCs from data/entities/
+    [INFO] Loaded 12 quests from data/quests/
+    ```
+  </Step>
+  
+  <Step title="Launch the client">
+    Open a **new terminal** (keep the server running) and run:
+    
+    ```bash
+    cd client
+    cargo run --release
+    ```
+    
+    The game window will open. You can now:
+    - **Login** with existing credentials
+    - **Register** a new account
+    - **Guest Mode** (if `DEV_MODE = true` in `client/src/main.rs`)
+  </Step>
+</Steps>
+
+<Check>
+  **Success!** You should now see the game window with the login screen or world view.
+</Check>
+
+## Understanding the Setup
+
+### Server Architecture
+
+The Rust server handles all game logic and state:
+
+```rust rust-server/src/main.rs
+#[tokio::main]
+async fn main() {
+    // Initialize SQLite database
+    let db = Database::new("game.db").await;
+    
+    // Load game data from TOML files
+    let item_registry = ItemRegistry::load("data/items.toml");
+    let entity_registry = EntityRegistry::load("data/entities/");
+    let quest_registry = QuestRegistry::load("data/quests/");
+    
+    // Build Axum router
+    let app = Router::new()
+        .route("/api/register", post(register))
+        .route("/api/login", post(login))
+        .route("/matchmake/joinOrCreate/:room", post(matchmake))
+        .route("/:room_id", get(websocket_handler));
+    
+    // Start server on port 2567
+    axum::Server::bind(&"0.0.0.0:2567".parse().unwrap())
+        .serve(app.into_make_service())
+        .await;
+}
+```
+
+<Accordion title="Server endpoints">
+  | Endpoint | Method | Purpose |
+  |----------|--------|----------|
+  | `/api/register` | POST | Create new account (Argon2 hashed passwords) |
+  | `/api/login` | POST | Authenticate and receive session token |
+  | `/api/logout` | POST | Invalidate session token |
+  | `/matchmake/joinOrCreate/:room` | POST | Get or create game room, receive `sessionId` |
+  | `/:room_id` | GET | WebSocket upgrade for game connection |
+</Accordion>
+
+### Client Connection Flow
+
+The client uses a multi-stage connection process:
+
+```rust client/src/network/client.rs
+// 1. Authenticate via REST API
+let response = ureq::post(&format!("{}/api/login", SERVER_URL))
+    .send_json(json!({ "username": username, "password": password }))?;
+
+let token = response.into_json::<LoginResponse>()?.token;
+
+// 2. Matchmake into a room
+let response = ureq::post(&format!("{}/matchmake/joinOrCreate/game_room", SERVER_URL))
+    .set("Authorization", &format!("Bearer {}", token))
+    .send()?;
+
+let room_data = response.into_json::<RoomData>()?;
+
+// 3. Connect WebSocket
+let ws_url = format!("{}/{}?sessionId={}", WS_URL, room_data.roomId, room_data.sessionId);
+let ws = ewebsock::connect(ws_url)?;
+```
+
+<Info>
+  The session token is signed with HMAC-SHA256 to prevent tampering. It's validated on every WebSocket message.
+</Info>
+
+## Configuration
+
+### Server Configuration
+
+The server loads game data from **TOML files** in the `rust-server/data/` directory:
+
+<CodeGroup>
+```toml data/items.toml (excerpt)
+[[items]]
+id = 1
+name = "Bronze Sword"
+item_type = "Weapon"
+equipment_slot = "MainHand"
+attack_bonus = 5
+value = 50
+stackable = false
+
+[[items]]
+id = 100
+name = "Cooked Salmon"
+item_type = "Food"
+heals = 15
+value = 30
+stackable = true
+max_stack = 100
+```
+
+```toml data/entities/monsters/goblin.toml
+id = "goblin"
+name = "Goblin"
+max_hp = 25
+attack = 3
+defense = 2
+aggressive = true
+agro_range = 5
+respawn_time = 30
+
+[[drops]]
+item_id = 1  # Bronze Sword
+chance = 0.1  # 10% drop rate
+quantity = 1
+
+[[drops]]
+item_id = 2  # Gold coins
+chance = 1.0
+quantity = { min = 5, max = 15 }
+```
+</CodeGroup>
+
+<Tip>
+  Edit these TOML files and restart the server to modify items, NPCs, and loot tables without recompiling.
+</Tip>
+
+### Client Configuration
+
+The client connects to the server URL defined in `client/src/main.rs`:
+
+```rust client/src/main.rs
+// Production server
+const SERVER_URL: &str = "https://aeven.xyz";
+const WS_URL: &str = "wss://aeven.xyz";
+
+// Local development
+// const SERVER_URL: &str = "http://localhost:2567";
+// const WS_URL: &str = "ws://localhost:2567";
+
+// Enable guest login for testing
+const DEV_MODE: bool = false;
+```
+
+<Warning>
+  Set `DEV_MODE = true` to enable guest login without authentication. Never use this in production!
+</Warning>
+
+## Building for Production
+
+### Server Deployment
+
+```bash
+cd rust-server
+cargo build --release
+
+# Binary located at:
+# ./target/release/isometric-server
+
+# Run with environment variables
+RUST_LOG=info ./target/release/isometric-server
+```
+
+<Accordion title="Server environment variables">
+  | Variable | Default | Description |
+  |----------|---------|-------------|
+  | `RUST_LOG` | `info` | Logging level (`trace`, `debug`, `info`, `warn`, `error`) |
+  | `DATABASE_URL` | `sqlite:game.db` | SQLite database path |
+  | `PORT` | `2567` | Server port (modify in code) |
+</Accordion>
+
+### Client Builds
+
+<Tabs>
+  <Tab title="Desktop (Native)">
+    ```bash
+    cd client
+    cargo build --release
+    
+    # Binary located at:
+    # ./target/release/new-aeven
+    ```
+    
+    The native build includes:
+    - Full network support
+    - Character selection
+    - Local settings persistence
+    - Window icons
+  </Tab>
+  
+  <Tab title="Web (WASM)">
+    ```bash
+    cd client
+    rustup target add wasm32-unknown-unknown
+    cargo build --target wasm32-unknown-unknown --profile release-wasm
+    ```
+    
+    <Note>
+      WASM builds currently run in **offline demo mode**. Network code is conditionally compiled out for `wasm32` targets.
+    </Note>
+  </Tab>
+</Tabs>
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Server won't start - 'Address already in use'">
+    Port 2567 is already in use. Find and kill the process:
+    
+    ```bash
+    # macOS/Linux
+    lsof -ti:2567 | xargs kill -9
+    
+    # Windows
+    netstat -ano | findstr :2567
+    taskkill /PID <PID> /F
+    ```
+  </Accordion>
+  
+  <Accordion title="Client can't connect - 'Connection refused'">
+    Ensure:
+    1. Server is running (`cargo run --release` in `rust-server/`)
+    2. Server URL in `client/src/main.rs` matches your setup
+    3. Firewall allows connections on port 2567
+    
+    Check server logs for errors:
+    ```bash
+    RUST_LOG=debug cargo run --release
+    ```
+  </Accordion>
+  
+  <Accordion title="Build errors - 'linker not found'">
+    Install platform-specific build tools:
+    
+    **macOS:**
+    ```bash
+    xcode-select --install
+    ```
+    
+    **Ubuntu/Debian:**
+    ```bash
+    sudo apt install build-essential
+    ```
+    
+    **Windows:**
+    Install [Visual Studio Build Tools](https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio-2022)
+  </Accordion>
+  
+  <Accordion title="Game is laggy or stuttering">
+    - **Server:** Run in `--release` mode (not debug)
+    - **Client:** Check GPU drivers are up to date
+    - **Network:** High ping (>100ms) affects gameplay
+    - **Performance:** Lower player count or reduce NPC spawns in TOML configs
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+Now that you have Aeven running, explore the game systems:
+
+<CardGroup cols={2}>
+  <Card title="Combat System" icon="sword" href="/features/combat">
+    Learn melee, ranged, and NPC AI mechanics
+  </Card>
+  <Card title="Quest Scripting" icon="scroll" href="/tools/quest-scripting">
+    Write Lua quests with dialogue and objectives
+  </Card>
+  <Card title="Map Editor" icon="map" href="/tools/map-editor">
+    Build custom worlds with the React editor
+  </Card>
+  <Card title="Server API" icon="server" href="/api/server/game-room">
+    Extend server logic with custom systems
+  </Card>
+</CardGroup>
+
+<Tip>
+  Join the [GitHub discussions](https://github.com/andrewrexo/isometric-game/discussions) to ask questions and share your creations!
+</Tip>

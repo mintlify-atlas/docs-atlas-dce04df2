@@ -1,0 +1,273 @@
+---
+title: GameState
+description: Core game state management and client-side data structures
+---
+
+## Overview
+
+The `GameState` struct is the central data structure that holds all client-side game state, including player data, entities, UI state, network status, and world chunks. It coordinates between the network layer, input handling, and rendering systems.
+
+## GameState
+
+Main state container for the game client.
+
+### Fields
+
+<ParamField path="local_player_id" type="Option<String>">
+  ID of the local player entity
+</ParamField>
+
+<ParamField path="players" type="HashMap<String, Player>">
+  All players in the current game instance, keyed by player ID
+</ParamField>
+
+<ParamField path="npcs" type="HashMap<String, Npc>">
+  All NPCs/enemies in the game world, keyed by NPC ID
+</ParamField>
+
+<ParamField path="ground_items" type="HashMap<String, GroundItem>">
+  Items dropped on the ground, keyed by item ID
+</ParamField>
+
+<ParamField path="inventory" type="Inventory">
+  Local player's inventory (28 slots)
+</ParamField>
+
+<ParamField path="camera" type="Camera">
+  Camera position and zoom level for rendering
+</ParamField>
+
+<ParamField path="ui_state" type="UiState">
+  All UI panel states (inventory, bank, shop, etc.)
+</ParamField>
+
+<ParamField path="chunk_manager" type="ChunkManager">
+  Manages loaded world chunks and tile data
+</ParamField>
+
+<ParamField path="connection_status" type="ConnectionStatus">
+  Current network connection state (Connected, Disconnected, Reconnecting)
+</ParamField>
+
+<ParamField path="server_tick" type="u64">
+  Current server simulation tick for synchronization
+</ParamField>
+
+### Methods
+
+<ParamField path="get_local_player()" type="Option<&Player>">
+  Get reference to the local player entity
+</ParamField>
+
+## Player
+
+Represents a player character in the game world.
+
+### Fields
+
+<ParamField path="id" type="String>">
+  Unique player identifier
+</ParamField>
+
+<ParamField path="name" type="String>">
+  Display name
+</ParamField>
+
+<ParamField path="x" type="f32">
+  Rendered X position (smoothly interpolated)
+</ParamField>
+
+<ParamField path="y" type="f32">
+  Rendered Y position (smoothly interpolated)
+</ParamField>
+
+<ParamField path="server_x" type="f32">
+  Server-authoritative X position
+</ParamField>
+
+<ParamField path="server_y" type="f32">
+  Server-authoritative Y position
+</ParamField>
+
+<ParamField path="hp" type="i32">
+  Current health points
+</ParamField>
+
+<ParamField path="max_hp" type="i32">
+  Maximum health points
+</ParamField>
+
+<ParamField path="mp" type="i32">
+  Current mana points
+</ParamField>
+
+<ParamField path="max_mp" type="i32">
+  Maximum mana points
+</ParamField>
+
+<ParamField path="skills" type="Skills">
+  Player skill levels (Attack, Strength, Defence, etc.)
+</ParamField>
+
+<ParamField path="direction" type="Direction">
+  Facing direction (Down, Left, Up, Right, or diagonal)
+</ParamField>
+
+<ParamField path="is_moving" type="bool">
+  Whether the player is currently moving
+</ParamField>
+
+<ParamField path="is_dead" type="bool">
+  Whether the player is dead
+</ParamField>
+
+<ParamField path="gender" type="String">
+  Character gender ("male" or "female")
+</ParamField>
+
+<ParamField path="skin" type="String">
+  Skin tone ("tan", "pale", "brown", "fish", "orc", "panda", "skeleton")
+</ParamField>
+
+<ParamField path="equipped_weapon" type="Option<String>">
+  Item ID of equipped weapon
+</ParamField>
+
+<ParamField path="equipped_body" type="Option<String>">
+  Item ID of equipped body armor
+</ParamField>
+
+<ParamField path="equipped_head" type="Option<String>">
+  Item ID of equipped helmet/hat
+</ParamField>
+
+### Methods
+
+<ParamField path="combat_level()" type="i32">
+  Calculate combat level from skills
+</ParamField>
+
+<ParamField path="attack_bonus(item_registry)" type="i32">
+  Total attack bonus from equipped items
+</ParamField>
+
+<ParamField path="strength_bonus(item_registry)" type="i32">
+  Total strength bonus from equipped items
+</ParamField>
+
+<ParamField path="defence_bonus(item_registry)" type="i32">
+  Total defence bonus from equipped items
+</ParamField>
+
+## Camera
+
+Controls viewport position and zoom for rendering.
+
+### Fields
+
+<ParamField path="x" type="f32">
+  World X coordinate of camera center
+</ParamField>
+
+<ParamField path="y" type="f32">
+  World Y coordinate of camera center
+</ParamField>
+
+<ParamField path="zoom" type="f32">
+  Zoom level (1.0 = default, higher = zoomed in)
+</ParamField>
+
+<ParamField path="initialized" type="bool">
+  Whether camera has been positioned
+</ParamField>
+
+## FrameTimings
+
+Performance diagnostics for frame rendering.
+
+### Fields
+
+<ParamField path="network_ms" type="f64">
+  Time spent processing network messages
+</ParamField>
+
+<ParamField path="render_total_ms" type="f64">
+  Total rendering time
+</ParamField>
+
+<ParamField path="render_ground_ms" type="f64">
+  Time rendering ground tiles
+</ParamField>
+
+<ParamField path="render_entities_ms" type="f64">
+  Time rendering players and NPCs
+</ParamField>
+
+<ParamField path="render_ui_ms" type="f64">
+  Time rendering UI elements
+</ParamField>
+
+<ParamField path="delta_ms" type="f64">
+  Frame delta time in milliseconds
+</ParamField>
+
+<ParamField path="fps_cap" type="Option<u32>">
+  FPS limit (None = uncapped)
+</ParamField>
+
+### Methods
+
+<ParamField path="record_delta(delta_ms)">
+  Record frame delta and update rolling statistics
+</ParamField>
+
+## ChatLog
+
+Per-channel chat message storage.
+
+### Methods
+
+<ParamField path="push(message)">
+  Add a chat message to the appropriate channel
+</ParamField>
+
+<ParamField path="channel(channel)" type="&[ChatMessage]">
+  Get messages for a specific channel (Local, Global, System)
+</ParamField>
+
+<ParamField path="latest_timestamp(channel)" type="f64">
+  Get the latest message timestamp for a channel
+</ParamField>
+
+## Example Usage
+
+```rust
+// Access local player
+if let Some(player) = state.get_local_player() {
+    println!("Player at ({}, {})", player.x, player.y);
+    println!("HP: {}/{}", player.hp, player.max_hp);
+    println!("Combat Level: {}", player.combat_level());
+}
+
+// Update camera to follow player
+if let Some(player) = state.get_local_player() {
+    state.camera.x = player.x;
+    state.camera.y = player.y;
+}
+
+// Check connection status
+if state.connection_status == ConnectionStatus::Connected {
+    // Send commands to server
+}
+
+// Access chat messages
+for message in state.ui_state.chat_messages.channel(&ChatChannel::Local) {
+    println!("[{}] {}: {}", message.timestamp, message.sender_name, message.text);
+}
+```
+
+## Related
+
+- [NetworkClient](/api/client/network) - Network communication
+- [Renderer](/api/client/rendering) - Rendering game state
+- [InputHandler](/api/client/input) - Processing player input

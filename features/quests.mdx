@@ -1,0 +1,493 @@
+---
+title: Quest System
+description: Hybrid TOML + Lua quest system with branching dialogue and quest chains
+---
+
+Aeven features a **hybrid quest system** using TOML for quest metadata and Lua scripts for complex logic, inspired by RuneScape's quest design.
+
+## Quest Architecture
+
+### Hybrid Design
+
+Quests use a two-layer approach:
+
+1. **TOML Definition**: Quest metadata, objectives, rewards, simple dialogue
+2. **Lua Scripts** (optional): Complex logic, branching dialogue, dynamic rewards
+
+```toml
+# data/quests/tutorial_quest.toml
+[quest]
+id = "tutorial_quest"
+name = "Welcome to Aeven"
+description = "Learn the basics of Aeven."
+giver_npc = "elder_villager"
+level_required = 1
+lua_script = "tutorial_quest.lua"  # Optional
+
+[[quest.objectives]]
+id = "talk_to_elder"
+type = "talk_to"
+target = "elder_villager"
+count = 1
+description = "Talk to the Elder Villager"
+
+[[quest.objectives]]
+id = "kill_slimes"
+type = "kill_monster"
+target = "slime"
+count = 5
+description = "Kill 5 Slimes"
+
+[quest.rewards]
+exp = 100
+gold = 50
+items = [
+    { id = "health_potion", count = 3 }
+]
+```
+
+### Quest Registry
+
+Quests are loaded from `data/quests/` at server startup:
+
+```rust
+// From rust-server/src/quest/registry.rs
+pub struct QuestRegistry {
+    quests: HashMap<String, Quest>,
+    quest_dir: PathBuf,
+}
+
+impl QuestRegistry {
+    pub fn load_from_directory(path: &Path) -> Result<Self, String> {
+        // Load all .toml files in quest directory
+        // Parse TOML into Quest structs
+        // Validate objectives and chains
+    }
+}
+```
+
+## Objective Types
+
+Aeven supports 8 objective types:
+
+```rust
+pub enum ObjectiveType {
+    KillMonster,     // Kill X monsters of type Y
+    CollectItem,     // Collect X items of type Y
+    TalkTo,          // Talk to a specific NPC
+    ReachLocation,   // Reach a specific location
+    DepleteTree,     // Chop down X trees completely
+    DepleteRock,     // Mine out X rocks completely
+    ReachLevel,      // Reach level X in a specific skill
+    ReachGold,       // Reach (or earn up to) X gold
+}
+```
+
+### Kill Monster
+
+```toml
+[[quest.objectives]]
+id = "hunt_slimes"
+type = "kill_monster"
+target = "slime"  # Entity prototype ID
+count = 10
+description = "Kill 10 Slimes"
+```
+
+Progress is tracked when NPCs die:
+
+```rust
+// Server increments kill count when player kills matching NPC
+if npc.prototype_id == objective.target {
+    progress.count += 1;
+}
+```
+
+### Collect Item
+
+```toml
+[[quest.objectives]]
+id = "gather_logs"
+type = "collect_item"
+target = "oak_log"
+count = 20
+description = "Gather 20 Oak Logs"
+```
+
+Checks player's inventory:
+
+```rust
+let current = player.inventory.count_item(&objective.target);
+if current >= objective.count {
+    objective_complete = true;
+}
+```
+
+### Talk To
+
+```toml
+[[quest.objectives]]
+id = "talk_blacksmith"
+type = "talk_to"
+target = "blacksmith_npc"  # NPC prototype ID
+count = 1
+description = "Talk to the Blacksmith"
+dialogue = "The blacksmith nods and gives you a hammer."  # Optional
+```
+
+Completes when player interacts with NPC.
+
+### Reach Location
+
+```toml
+[[quest.objectives]]
+id = "visit_cave"
+type = "reach_location"
+target = "dark_cave_entrance"  # Location ID from quest_locations.toml
+count = 1
+description = "Find the Dark Cave entrance"
+```
+
+Location definitions in `data/quest_locations.toml`:
+
+```toml
+[dark_cave_entrance]
+x = 45
+y = 78
+radius = 3  # Player must be within 3 tiles
+```
+
+### Deplete Tree
+
+```toml
+[[quest.objectives]]
+id = "chop_trees"
+type = "deplete_tree"
+target = "oak_tree"
+count = 5
+description = "Fully chop down 5 Oak Trees"
+```
+
+Tracks when trees are completely depleted (no logs remaining).
+
+### Deplete Rock
+
+```toml
+[[quest.objectives]]
+id = "mine_rocks"
+type = "deplete_rock"
+target = "copper_rock"
+count = 3
+description = "Fully mine 3 Copper Rocks"
+```
+
+Tracks when rocks are completely mined out.
+
+### Reach Level
+
+```toml
+[[quest.objectives]]
+id = "train_combat"
+type = "reach_level"
+target = "attack"  # Skill name
+count = 10
+description = "Reach Attack level 10"
+```
+
+### Reach Gold
+
+```toml
+[[quest.objectives]]
+id = "earn_gold"
+type = "reach_gold"
+target = "gold"
+count = 1000
+description = "Earn 1000 gold"
+```
+
+Tracks total gold earned (not just current inventory).
+
+## Quest Chains
+
+Quests can be linked in chains:
+
+```toml
+[quest.chain]
+previous = "tutorial_quest"  # Must complete this quest first
+next = "advanced_combat"     # Unlocks this quest after completion
+branch_from = "moral_choice" # Alternative path from another quest
+```
+
+**Chain Validation**:
+- Server checks `previous` quest is completed before offering quest
+- Completing quest unlocks `next` quest
+- `branch_from` allows alternate paths in quest storylines
+
+## Lua Scripting
+
+### Quest Runner
+
+The quest runner executes Lua scripts for complex logic:
+
+```rust
+// From rust-server/src/quest/runner.rs
+pub struct QuestRunner {
+    registry: Arc<QuestRegistry>,
+}
+
+impl QuestRunner {
+    pub fn execute_dialogue(&self, quest_id: &str, context: QuestContext) -> Result<DialogueResult, String> {
+        // Load Lua script
+        // Create Lua VM with quest API
+        // Execute dialogue function
+        // Return dialogue choices or completion
+    }
+}
+```
+
+### Quest API
+
+Lua scripts have access to a quest API:
+
+```lua
+-- Example: tutorial_quest.lua
+
+function on_offer(player)
+    -- Called when quest is offered
+    return {
+        text = "Welcome, " .. player.name .. "! Will you help me?",
+        choices = {
+            { text = "Yes, I'll help!", accept = true },
+            { text = "Not right now.", accept = false }
+        }
+    }
+end
+
+function on_progress(player, objectives)
+    -- Called when checking quest progress
+    if objectives.kill_slimes.count >= 3 then
+        return {
+            text = "You're doing well! Keep hunting those slimes."
+        }
+    else
+        return {
+            text = "I need you to kill 5 slimes for me."
+        }
+    end
+end
+
+function on_complete(player)
+    -- Called when quest is completed
+    -- Can award bonus rewards
+    return {
+        text = "Excellent work! Here's your reward.",
+        bonus_gold = player.level * 10,  -- Dynamic reward
+        bonus_items = {
+            { id = "steel_sword", count = 1 }
+        }
+    }
+end
+```
+
+### Branching Dialogue
+
+Lua scripts can create complex dialogue trees:
+
+```lua
+function on_talk(player, npc, context)
+    if player.quest_stage == 1 then
+        return {
+            text = "Have you found the artifact?",
+            choices = {
+                { 
+                    text = "Yes, here it is.", 
+                    requires_item = "ancient_artifact",
+                    next_stage = 2 
+                },
+                { 
+                    text = "Not yet.",
+                    next_stage = 1 
+                },
+                {
+                    text = "I refuse to help.",
+                    fail_quest = true
+                }
+            }
+        }
+    end
+end
+```
+
+## Quest State
+
+### Player Quest State
+
+Each player's quest progress is tracked:
+
+```rust
+pub struct PlayerQuestState {
+    /// Active quests: quest_id -> progress
+    pub active: HashMap<String, QuestProgress>,
+    /// Completed quest IDs
+    pub completed: HashSet<String>,
+    /// Failed quest IDs (for non-repeatable quests)
+    pub failed: HashSet<String>,
+}
+
+pub struct QuestProgress {
+    pub quest_id: String,
+    pub status: QuestStatus,
+    /// Objective ID -> current count
+    pub objectives: HashMap<String, i32>,
+    pub started_at: u64,
+}
+
+pub enum QuestStatus {
+    Available,    // Can be started
+    Active,       // In progress
+    Completed,    // Finished
+    Failed,       // Failed (non-repeatable)
+}
+```
+
+### Quest Events
+
+Quest progress is triggered by events:
+
+```rust
+pub enum QuestEvent {
+    KillMonster { prototype_id: String },
+    CollectItem { item_id: String },
+    TalkToNpc { npc_id: String },
+    ReachLocation { location_id: String },
+    DepleteTree { tree_type: String },
+    DepleteRock { rock_type: String },
+    LevelUp { skill: SkillType, level: i32 },
+    GoldEarned { amount: i32 },
+}
+```
+
+The server processes events and updates quest progress:
+
+```rust
+// When player kills NPC
+quest_system.process_event(
+    player_id,
+    QuestEvent::KillMonster { 
+        prototype_id: npc.prototype_id.clone() 
+    }
+);
+
+// When player picks up item
+quest_system.process_event(
+    player_id,
+    QuestEvent::CollectItem { 
+        item_id: item.item_id.clone() 
+    }
+);
+```
+
+## Quest Rewards
+
+### Standard Rewards
+
+Defined in TOML:
+
+```toml
+[quest.rewards]
+exp = 500       # Combat XP (distributed via combat style)
+gold = 250
+items = [
+    { id = "iron_sword", count = 1 },
+    { id = "health_potion", count = 5 }
+]
+```
+
+### Bonus Rewards
+
+Lua scripts can add dynamic rewards:
+
+```lua
+function on_complete(player)
+    local bonus_gold = 0
+    if player.combat_level >= 20 then
+        bonus_gold = 500  -- Bonus for high-level players
+    end
+    
+    return {
+        text = "Well done!",
+        bonus_gold = bonus_gold,
+        bonus_items = {
+            { id = "rare_gem", count = 1 }
+        }
+    }
+end
+```
+
+## Quest UI
+
+### Quest Giver Indicators
+
+NPCs with quests show visual indicators:
+
+```rust
+pub struct NpcUpdate {
+    pub is_quest_giver: bool,     // NPC offers quests
+    pub can_turn_in_quest: bool,  // Quest ready to complete
+}
+```
+
+- **Yellow exclamation mark**: Quest available
+- **Yellow question mark**: Quest in progress
+- **Green question mark**: Quest ready to turn in
+
+### Quest Journal
+
+Players can view active quests:
+
+- Quest name and description
+- Objective progress (e.g., "Kill Slimes: 3/5")
+- Quest giver location
+- Rewards preview
+
+## Repeatable Quests
+
+Quests can be marked as repeatable:
+
+```toml
+[quest]
+id = "daily_hunt"
+name = "Daily Slayer Task"
+repeatable = true  # Can be done multiple times
+```
+
+Repeatable quests:
+- Can be accepted again after completion
+- Don't add to `completed` set permanently
+- Useful for daily tasks and farming
+
+## Hot Reloading
+
+<Note>
+Quest definitions and Lua scripts support **hot reloading** during development. Changes are detected and reloaded without restarting the server.
+</Note>
+
+```rust
+// Quest registry monitors quest directory for changes
+pub enum HotReloadEvent {
+    QuestAdded(String),
+    QuestModified(String),
+    QuestRemoved(String),
+}
+```
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Skills & Leveling" icon="chart-line" href="/features/skills">
+    XP rewards and level requirements
+  </Card>
+  <Card title="Items & Inventory" icon="backpack" href="/features/items">
+    Item rewards and collection objectives
+  </Card>
+</CardGroup>

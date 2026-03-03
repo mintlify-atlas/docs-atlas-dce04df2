@@ -1,0 +1,510 @@
+---
+title: Items & Inventory
+description: Inventory system, loot drops, equipment, and item management
+---
+
+Aeven features a comprehensive item system with inventory management, equipment slots, loot drops, and a banking system.
+
+## Inventory System
+
+### Inventory Structure
+
+```rust
+// From rust-server/src/item.rs
+pub const INVENTORY_SIZE: usize = 20;  // 20 inventory slots
+
+pub struct Inventory {
+    pub slots: Vec<Option<InventorySlot>>,  // 20 slots
+    pub gold: i32,  // Gold stored separately
+}
+
+pub struct InventorySlot {
+    pub item_id: String,
+    pub quantity: i32,
+}
+```
+
+**Features**:
+- 20 inventory slots
+- Item stacking (up to max_stack per item)
+- Separate gold counter
+- Quick slots (1-5 keys)
+
+### Item Stacking
+
+Items stack based on their `max_stack` property:
+
+```rust
+pub const DEFAULT_MAX_STACK: i32 = 99;
+
+pub fn add_item(&mut self, item_id: &str, mut quantity: i32, registry: &ItemRegistry) -> i32 {
+    // Gold goes to separate counter
+    if item_id == GOLD_ITEM_ID {
+        self.gold += quantity;
+        return 0;
+    }
+    
+    let max_stack = registry
+        .get(item_id)
+        .map(|def| def.max_stack)
+        .unwrap_or(DEFAULT_MAX_STACK);
+    
+    // First, stack with existing items
+    for slot in &mut self.slots {
+        if let Some(inv_slot) = slot {
+            if inv_slot.item_id == item_id {
+                let can_add = max_stack - inv_slot.quantity;
+                if can_add > 0 {
+                    let add = quantity.min(can_add);
+                    inv_slot.quantity += add;
+                    quantity -= add;
+                }
+            }
+        }
+    }
+    
+    // Then, fill empty slots
+    for slot in &mut self.slots {
+        if slot.is_none() {
+            let add = quantity.min(max_stack);
+            *slot = Some(InventorySlot::new(item_id.to_string(), add));
+            quantity -= add;
+        }
+    }
+    
+    quantity  // Return what couldn't fit
+}
+```
+
+**Stacking Behavior**:
+- Potions stack to 99
+- Equipment typically doesn't stack (max_stack = 1)
+- Excess items are dropped on the ground if inventory full
+
+### Using Items
+
+```rust
+pub fn use_item(&mut self, slot_index: usize, registry: &ItemRegistry) -> Option<String> {
+    if let Some(ref mut slot) = self.slots[slot_index] {
+        let is_usable = registry
+            .get(&slot.item_id)
+            .map(|def| def.is_usable())
+            .unwrap_or(false);
+        
+        if is_usable {
+            let item_id = slot.item_id.clone();
+            slot.quantity -= 1;
+            if slot.quantity <= 0 {
+                self.slots[slot_index] = None;
+            }
+            return Some(item_id);
+        }
+    }
+    None
+}
+```
+
+**Usable Items**:
+- Health Potions: Restore 30 HP
+- Prayer Potions: Restore prayer points
+- Buff Potions: Temporary stat boosts
+- Food items: Restore HP
+
+<CodeGroup>
+```rust Health Potion Effect
+// When player uses health_potion
+if item_id == "health_potion" {
+    player.hp = (player.hp + 30).min(player.max_hp());
+    // Send floating heal text to client
+}
+```
+
+```rust Buff Potion Effect
+// Strength potion: +3 Strength for 5 minutes
+player.apply_buff(
+    "strength".to_string(),
+    3,  // +3 bonus
+    300_000,  // 5 minutes
+    current_time_ms
+);
+```
+</CodeGroup>
+
+## Equipment System
+
+### Equipment Slots
+
+Players have 9 equipment slots:
+
+```rust
+pub struct Player {
+    pub equipped_head: Option<String>,
+    pub equipped_body: Option<String>,
+    pub equipped_weapon: Option<String>,
+    pub equipped_back: Option<String>,     // Cape slot
+    pub equipped_feet: Option<String>,
+    pub equipped_ring: Option<String>,
+    pub equipped_gloves: Option<String>,
+    pub equipped_necklace: Option<String>,
+    pub equipped_belt: Option<String>,
+}
+```
+
+### Equipment Stats
+
+Equipment provides combat bonuses:
+
+```rust
+// Item definition includes equipment stats
+pub struct EquipmentStats {
+    pub slot: EquipmentSlot,
+    pub attack_bonus: i32,
+    pub strength_bonus: i32,
+    pub defence_bonus: i32,
+    pub ranged_bonus: i32,
+    pub magic_bonus: i32,
+    pub prayer_bonus: i32,
+}
+```
+
+**Example Equipment**:
+
+<Tabs>
+  <Tab title="Melee Weapon">
+    ```toml
+    [items.iron_sword]
+    id = "iron_sword"
+    name = "Iron Sword"
+    max_stack = 1
+    
+    [items.iron_sword.equipment]
+    slot = "weapon"
+    attack_bonus = 10
+    strength_bonus = 8
+    ```
+  </Tab>
+  <Tab title="Armor">
+    ```toml
+    [items.iron_platebody]
+    id = "iron_platebody"
+    name = "Iron Platebody"
+    max_stack = 1
+    
+    [items.iron_platebody.equipment]
+    slot = "body"
+    defence_bonus = 15
+    ```
+  </Tab>
+  <Tab title="Bow">
+    ```toml
+    [items.oak_bow]
+    id = "oak_bow"
+    name = "Oak Bow"
+    max_stack = 1
+    
+    [items.oak_bow.equipment]
+    slot = "weapon"
+    weapon_type = "ranged"
+    attack_range = 5
+    ranged_bonus = 12
+    ```
+  </Tab>
+</Tabs>
+
+### Calculating Total Bonuses
+
+Bonuses are summed from all equipped items:
+
+```rust
+pub fn attack_bonus(&self, item_registry: &ItemRegistry) -> i32 {
+    let mut bonus = 0;
+    for equipped in self.all_equipped() {
+        if let Some(item_id) = equipped {
+            if let Some(def) = item_registry.get(item_id) {
+                if let Some(equip) = &def.equipment {
+                    bonus += equip.attack_bonus;
+                }
+            }
+        }
+    }
+    bonus + self.buff_bonus("attack")  // Add potion buffs
+}
+```
+
+## Loot System
+
+### Loot Tables
+
+NPCs drop loot based on loot tables:
+
+```toml
+# Entity definition
+[entities.slime]
+sprite = "slime"
+display_name = "Slime"
+
+[entities.slime.stats]
+max_hp = 20
+damage = 5
+level = 1
+
+[entities.slime.rewards]
+exp_base = 10
+
+# Loot table
+[[entities.slime.rewards.loot_table]]
+item_id = "slime_goo"
+min = 1
+max = 3
+chance = 0.8  # 80% drop rate
+
+[[entities.slime.rewards.loot_table]]
+item_id = "health_potion"
+min = 1
+max = 1
+chance = 0.1  # 10% drop rate
+
+[[entities.slime.rewards.loot_table]]
+item_id = "gold"
+min = 5
+max = 15
+chance = 1.0  # Always drop gold
+```
+
+### Loot Generation
+
+```rust
+// When NPC dies, roll loot table
+for loot_entry in &npc.loot_table {
+    if rand::random::<f64>() <= loot_entry.chance {
+        let quantity = rand::gen_range(loot_entry.min..=loot_entry.max);
+        
+        // Create ground item at NPC position
+        let item = GroundItem::new(
+            &item_id,
+            npc.x as f32,
+            npc.y as f32,
+            quantity,
+            Some(killer_id.to_string()),  // Owner
+            current_time
+        );
+        
+        ground_items.insert(item.id.clone(), item);
+    }
+}
+```
+
+### Ground Items
+
+```rust
+pub struct GroundItem {
+    pub id: String,
+    pub item_id: String,
+    pub x: f32,
+    pub y: f32,
+    pub quantity: i32,
+    pub owner_id: Option<String>,  // Player who can pick up
+    pub drop_time: u64,            // When dropped
+    pub instance_id: Option<String>,  // Which instance (None = overworld)
+}
+```
+
+**Ground Item Mechanics**:
+
+```rust
+const OWNER_PERIOD_MS: u64 = 10000;  // 10 seconds owner-only
+const ITEM_LIFETIME_MS: u64 = 60000; // 60 seconds total lifetime
+
+pub fn can_pickup(&self, player_id: &str, current_time: u64) -> bool {
+    if current_time - self.drop_time < OWNER_PERIOD_MS {
+        // During owner period, only owner can pick up
+        match &self.owner_id {
+            Some(owner) => owner == player_id,
+            None => true,
+        }
+    } else {
+        // After owner period, anyone can pick up
+        true
+    }
+}
+
+pub fn is_expired(&self, current_time: u64) -> bool {
+    current_time.saturating_sub(self.drop_time) > ITEM_LIFETIME_MS
+}
+```
+
+**Timeline**:
+1. **0-10s**: Only killer can pick up loot
+2. **10s-60s**: Anyone can pick up loot
+3. **60s+**: Item despawns
+
+### Picking Up Items
+
+```rust
+// F key to pickup nearest item (2 tile range)
+const PICKUP_RANGE: f32 = 2.0;
+
+// Find nearest item within range
+let nearest = ground_items
+    .iter()
+    .filter(|item| {
+        let dist = ((item.x - player.x as f32).powi(2) + (item.y - player.y as f32).powi(2)).sqrt();
+        dist <= PICKUP_RANGE && item.can_pickup(&player.id, current_time)
+    })
+    .min_by_key(|item| {
+        ((item.x - player.x as f32).powi(2) + (item.y - player.y as f32).powi(2)) as i32
+    });
+
+if let Some(item) = nearest {
+    // Add to inventory
+    let remainder = player.inventory.add_item(&item.item_id, item.quantity, registry);
+    
+    if remainder == 0 {
+        ground_items.remove(&item.id);  // Fully picked up
+    } else {
+        item.quantity = remainder;  // Partial pickup (inventory full)
+    }
+}
+```
+
+## Banking System
+
+### Bank Structure
+
+```rust
+pub const DEFAULT_BANK_SIZE: usize = 50;  // 50 slots default
+pub const BANK_MAX_SIZE: usize = 100;     // 100 slots max
+pub const BANK_UPGRADE_SLOTS: usize = 10; // +10 per upgrade
+pub const BANK_UPGRADE_COST: i32 = 5_000; // 5000 gold per upgrade
+
+pub struct Bank {
+    pub slots: Vec<Option<InventorySlot>>,
+    pub gold: i32,
+}
+```
+
+**Bank Features**:
+- **Unlimited stacking**: One slot per item type, no stack limit
+- **Separate gold vault**: Bank gold stored separately from inventory
+- **Upgradeable**: Purchase additional slots (50 → 60 → 70 → ... → 100)
+
+<CodeGroup>
+```rust Bank Storage
+pub fn add_item(&mut self, item_id: &str, quantity: i32, _registry: &ItemRegistry) -> i32 {
+    if item_id == GOLD_ITEM_ID {
+        self.gold += quantity;
+        return 0;
+    }
+    
+    // Find existing slot with this item and add to it (unlimited stacking)
+    for slot in &mut self.slots {
+        if let Some(inv_slot) = slot {
+            if inv_slot.item_id == item_id {
+                inv_slot.quantity = inv_slot.quantity.saturating_add(quantity);
+                return 0;
+            }
+        }
+    }
+    
+    // No existing slot — place in first empty slot
+    for slot in &mut self.slots {
+        if slot.is_none() {
+            *slot = Some(InventorySlot::new(item_id.to_string(), quantity));
+            return 0;
+        }
+    }
+    
+    // No space
+    quantity
+}
+```
+
+```rust Bank Withdrawal
+pub fn remove_item(&mut self, item_id: &str, mut count: i32) -> bool {
+    if !self.has_item(item_id, count) {
+        return false;
+    }
+    
+    for slot in &mut self.slots {
+        if count <= 0 {
+            break;
+        }
+        if let Some(inv_slot) = slot {
+            if inv_slot.item_id == item_id {
+                let remove = count.min(inv_slot.quantity);
+                inv_slot.quantity -= remove;
+                count -= remove;
+                if inv_slot.quantity <= 0 {
+                    *slot = None;
+                }
+            }
+        }
+    }
+    
+    true
+}
+```
+</CodeGroup>
+
+### Bank Access
+
+Players access banks via **Banker NPCs**:
+
+```rust
+// NPC with is_banker = true
+if npc.is_banker() {
+    // Client opens bank UI
+    // Server sends BankUpdate message with bank contents
+}
+```
+
+## Item Registry
+
+Items are defined in `data/items.toml`:
+
+```toml
+[items.health_potion]
+id = "health_potion"
+name = "Health Potion"
+description = "Restores 30 HP"
+max_stack = 99
+value = 10
+
+[items.health_potion.usable]
+heal_amount = 30
+
+[items.iron_sword]
+id = "iron_sword"
+name = "Iron Sword"
+description = "A sturdy iron blade"
+max_stack = 1
+value = 500
+
+[items.iron_sword.equipment]
+slot = "weapon"
+weapon_type = "melee"
+attack_bonus = 10
+strength_bonus = 8
+```
+
+## UI Controls
+
+| Key | Action |
+|-----|--------|
+| I | Toggle inventory |
+| 1-5 | Use quick slot item |
+| F | Pickup nearest item |
+| Left Click Item | Use/Equip item |
+| Right Click Item | Drop item |
+| Drag & Drop | Move items between slots |
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Combat System" icon="crossed-swords" href="/features/combat">
+    Equipment bonuses and combat stats
+  </Card>
+  <Card title="Quest System" icon="scroll" href="/features/quests">
+    Item rewards and collection objectives
+  </Card>
+</CardGroup>

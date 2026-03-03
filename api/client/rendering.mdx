@@ -1,0 +1,266 @@
+---
+title: Renderer
+description: Isometric rendering engine with depth sorting and sprite management
+---
+
+## Overview
+
+The `Renderer` handles all game rendering using an isometric projection. It manages sprite atlases, performs depth sorting for proper layering, and renders the game world, entities, and UI.
+
+## Renderer
+
+Main rendering system with sprite atlas management.
+
+### Constructor
+
+<ParamField path="new(audio)" type="async fn -> Renderer">
+  Create and initialize the renderer, loading all sprite assets
+  
+  <ParamField path="audio" type="&mut AudioManager" required>
+    Audio manager (also preloads music during initialization)
+  </ParamField>
+</ParamField>
+
+### Sprite Management
+
+The renderer uses sprite atlases on WASM/Android for performance, and individual textures on desktop:
+
+<ParamField path="player_sprites" type="SpritesheetStore">
+  Player character animations (male/female × 7 skin types)
+</ParamField>
+
+<ParamField path="equipment_sprites" type="SpritesheetStore">
+  Equipment animations (armor, weapons, capes)
+</ParamField>
+
+<ParamField path="npc_sprites" type="SpritesheetStore">
+  NPC/enemy animations
+</ParamField>
+
+<ParamField path="item_sprites" type="SpriteStore">
+  Inventory item icons
+</ParamField>
+
+<ParamField path="object_sprites" type="SpriteStore">
+  Map object sprites (trees, rocks, buildings)
+</ParamField>
+
+## Isometric Projection
+
+The game uses a 2:1 isometric projection with diamond-shaped tiles.
+
+### Constants
+
+<ParamField path="TILE_WIDTH" type="f32" default="64.0">
+  Tile width in pixels
+</ParamField>
+
+<ParamField path="TILE_HEIGHT" type="f32" default="32.0">
+  Tile height in pixels (half of width for 2:1 ratio)
+</ParamField>
+
+### Functions
+
+<ParamField path="world_to_screen(world_x, world_y, camera)" type="(f32, f32)">
+  Convert world coordinates to screen pixel coordinates
+  
+  <ParamField path="world_x" type="f32" required>
+    World X coordinate
+  </ParamField>
+  
+  <ParamField path="world_y" type="f32" required>
+    World Y coordinate
+  </ParamField>
+  
+  <ParamField path="camera" type="&Camera" required>
+    Camera for viewport offset and zoom
+  </ParamField>
+  
+  Returns pixel-snapped coordinates for crisp rendering.
+</ParamField>
+
+<ParamField path="screen_to_world(screen_x, screen_y, camera)" type="(f32, f32)">
+  Convert screen coordinates to world coordinates
+  
+  <ParamField path="screen_x" type="f32" required>
+    Screen X pixel coordinate
+  </ParamField>
+  
+  <ParamField path="screen_y" type="f32" required>
+    Screen Y pixel coordinate
+  </ParamField>
+  
+  <ParamField path="camera" type="&Camera" required>
+    Camera for viewport offset and zoom
+  </ParamField>
+  
+  Returns world tile coordinates (floating point).
+</ParamField>
+
+<ParamField path="calculate_depth(world_x, world_y, layer)" type="f32">
+  Calculate rendering depth for painter's algorithm sorting
+  
+  <ParamField path="world_x" type="f32" required>
+    World X coordinate
+  </ParamField>
+  
+  <ParamField path="world_y" type="f32" required>
+    World Y coordinate
+  </ParamField>
+  
+  <ParamField path="layer" type="u32" required>
+    Layer index (0=ground, 1=entities, 2=effects)
+  </ParamField>
+  
+  Returns depth value where higher values render on top.
+</ParamField>
+
+## Depth Sorting
+
+The renderer uses a painter's algorithm for proper layering:
+
+1. **Layer-based ordering** - Ground tiles < Entities < Effects (multiplied by 10000)
+2. **Within-layer sorting** - By `x + y` coordinate (down-right renders on top)
+3. **Rendering order** - Lowest depth first, highest depth last
+
+This ensures entities further down and to the right appear in front of those up and to the left.
+
+## RenderTimings
+
+Performance diagnostics returned after each frame.
+
+### Fields
+
+<ParamField path="ground_ms" type="f64">
+  Time rendering ground tiles and walls
+</ParamField>
+
+<ParamField path="entities_ms" type="f64">
+  Time rendering players, NPCs, and ground items
+</ParamField>
+
+<ParamField path="overhead_ms" type="f64">
+  Time rendering overhead elements (name tags, health bars)
+</ParamField>
+
+<ParamField path="effects_ms" type="f64">
+  Time rendering visual effects (particles, animations)
+</ParamField>
+
+<ParamField path="ui_ms" type="f64">
+  Time rendering UI panels and text
+</ParamField>
+
+<ParamField path="total_ms" type="f64">
+  Total frame render time
+</ParamField>
+
+## SpriteStore
+
+Storage for static sprites (items, objects, walls).
+
+### Variants
+
+<ParamField path="Atlas" type="SpriteAtlas">
+  Single texture atlas with multiple sprites (WASM/Android)
+</ParamField>
+
+<ParamField path="Individual" type="HashMap<String, Texture2D>">
+  Separate texture per sprite (Desktop)
+</ParamField>
+
+### Methods
+
+<ParamField path="get(key)" type="Option<(&Texture2D, Option<Rect>)>">
+  Get sprite texture and source rect by key
+  
+  <ParamField path="key" type="&str" required>
+    Sprite identifier (e.g., "iron_sword")
+  </ParamField>
+</ParamField>
+
+## SpritesheetStore
+
+Storage for animated sprite sheets (players, NPCs, equipment).
+
+### Variants
+
+<ParamField path="Atlas" type="{ texture: Texture2D, rects: HashMap<String, Rect> }">
+  Single atlas with multiple sprite sheets
+</ParamField>
+
+<ParamField path="Individual" type="HashMap<String, Texture2D>">
+  Separate sprite sheet per key
+</ParamField>
+
+### Methods
+
+<ParamField path="get(key)" type="Option<(&Texture2D, Option<(f32, f32)>)>">
+  Get sprite sheet texture and atlas offset
+  
+  <ParamField path="key" type="&str" required>
+    Sprite sheet identifier (e.g., "male_tan")
+  </ParamField>
+  
+  Returns texture and optional offset to add to frame coordinates.
+</ParamField>
+
+<ParamField path="get_dimensions(key)" type="Option<(f32, f32)>">
+  Get total sprite sheet dimensions
+</ParamField>
+
+## Example Usage
+
+```rust
+use aeven_client::render::{Renderer, world_to_screen, screen_to_world, calculate_depth};
+
+// Initialize renderer
+let mut renderer = Renderer::new(&mut audio).await;
+
+// Convert coordinates
+let (screen_x, screen_y) = world_to_screen(10.0, 5.0, &camera);
+let (world_x, world_y) = screen_to_world(mouse_x, mouse_y, &camera);
+
+// Calculate depth for sorting
+let player_depth = calculate_depth(player.x, player.y, 1);
+let tree_depth = calculate_depth(tree_x as f32, tree_y as f32, 0);
+
+if tree_depth < player_depth {
+    // Tree renders first (behind player)
+}
+
+// Access sprites
+if let Some((texture, rect)) = renderer.item_sprites.get("iron_sword") {
+    // Draw item sprite
+}
+
+if let Some((sheet, offset)) = renderer.player_sprites.get("male_tan") {
+    // Draw player animation frame
+}
+```
+
+## Rendering Pipeline
+
+The renderer processes each frame in this order:
+
+1. **Ground Layer** - Tiles, water, walls
+2. **Object Layer** - Trees, rocks, buildings (sorted by depth)
+3. **Entity Layer** - Players, NPCs, ground items (sorted by depth)
+4. **Overhead Layer** - Name tags, health bars, damage numbers
+5. **Effect Layer** - Particles, spell effects (sorted by depth)
+6. **UI Layer** - Panels, inventory, chat
+
+## Performance Optimizations
+
+- **Sprite atlases** on mobile reduce texture switches
+- **Pixel snapping** prevents sub-pixel jitter
+- **Depth pre-sorting** minimizes overdraw
+- **Culling** for off-screen entities
+- **Cached text rendering** for UI
+- **Instanced rendering** for tiles
+
+## Related
+
+- [GameState](/api/client/game-state) - Game state to render
+- [Camera](/api/client/game-state#camera) - Viewport control
+- [Animation](/api/client/rendering#animation) - Sprite animation system

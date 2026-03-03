@@ -1,0 +1,616 @@
+---
+title: 'Database'
+description: 'SQLite database operations for character and world persistence'
+---
+
+## Overview
+
+The `Database` struct provides persistent storage for accounts, characters, quests, skills, inventory, bank vaults, and all player progress. It uses SQLite with WAL mode for concurrent access and automatic migrations.
+
+## Struct Definition
+
+```rust
+pub struct Database {
+    pool: SqlitePool,
+}
+```
+
+Wraps a connection pool for async database operations.
+
+## Constructor
+
+```rust
+pub async fn new(database_url: &str) -> Result<Self, sqlx::Error>
+```
+
+Creates a new database connection pool and runs migrations.
+
+<ParamField path="database_url" type="&str" required>
+  SQLite database URL (e.g., `"sqlite://game.db"` or `"sqlite::memory:"`)
+</ParamField>
+
+<ResponseField name="database" type="Result<Database, sqlx::Error>">
+  Database instance with connection pool
+</ResponseField>
+
+**Configuration:**
+- Journal mode: WAL (Write-Ahead Logging) for better concurrency
+- Max connections: 5
+- Auto-runs migrations on startup
+
+**Example:**
+```rust
+let db = Database::new("sqlite://aeven.db").await?;
+```
+
+## Account System
+
+### create_account()
+
+```rust
+pub async fn create_account(&self, username: &str, password: &str) -> Result<i64, String>
+```
+
+Creates a new account with Argon2 password hashing.
+
+<ParamField path="username" type="&str" required>
+  Unique username for login
+</ParamField>
+
+<ParamField path="password" type="&str" required>
+  Plain text password (will be hashed)
+</ParamField>
+
+<ResponseField name="account_id" type="Result<i64, String>">
+  New account ID, or error if username already exists
+</ResponseField>
+
+**Security:**
+- Passwords hashed with Argon2id
+- Salted with random 128-bit salt
+- UNIQUE constraint on username (case-sensitive)
+
+---
+
+### verify_account_password()
+
+```rust
+pub async fn verify_account_password(
+    &self,
+    username: &str,
+    password: &str,
+) -> Option<AccountData>
+```
+
+Verifies login credentials and returns account data if valid.
+
+<ParamField path="username" type="&str" required>
+  Account username
+</ParamField>
+
+<ParamField path="password" type="&str" required>
+  Plain text password to verify
+</ParamField>
+
+<ResponseField name="account" type="Option<AccountData>">
+  Account data if credentials valid, None otherwise
+</ResponseField>
+
+**Side Effects:**
+- Updates `last_login` timestamp on successful login
+
+## Character Management
+
+### create_character()
+
+```rust
+pub async fn create_character(
+    &self,
+    account_id: i64,
+    name: &str,
+    gender: &str,
+    skin: &str,
+    hair_style: Option<i32>,
+    hair_color: Option<i32>,
+) -> Result<CharacterData, String>
+```
+
+Creates a new character with starting equipment.
+
+<ParamField path="account_id" type="i64" required>
+  Account that owns this character
+</ParamField>
+
+<ParamField path="name" type="&str" required>
+  Character name (globally unique, case-insensitive)
+</ParamField>
+
+<ParamField path="gender" type="&str" required>
+  "male" or "female"
+</ParamField>
+
+<ParamField path="skin" type="&str" required>
+  Skin tone: "tan", "pale", "brown", "fish", "orc", "panda", or "skeleton"
+</ParamField>
+
+<ParamField path="hair_style" type="Option<i32>">
+  Hair style index (0-5), or None for bald
+</ParamField>
+
+<ParamField path="hair_color" type="Option<i32>">
+  Hair color index (0-9), or None
+</ParamField>
+
+<ResponseField name="character" type="Result<CharacterData, String>">
+  Created character data, or error if name taken
+</ResponseField>
+
+**Starting Gear:**
+- Weapon: `"chain"` (pitchfork)
+- Body: `"torn_clothes"` (male) or `"peasant_suit_female"` (female)
+- Feet: `"worn_sandals"`
+- Gold: 25
+- Position: (-30.0, 19.0) in Cursed Lands
+
+---
+
+### get_characters_for_account()
+
+```rust
+pub async fn get_characters_for_account(
+    &self,
+    account_id: i64,
+) -> Result<Vec<CharacterData>, sqlx::Error>
+```
+
+Loads all characters for an account.
+
+<ResponseField name="characters" type="Vec<CharacterData>">
+  List of characters owned by this account, ordered by creation date (newest first)
+</ResponseField>
+
+---
+
+### delete_character()
+
+```rust
+pub async fn delete_character(
+    &self,
+    character_id: i64,
+    account_id: i64,
+) -> Result<bool, sqlx::Error>
+```
+
+Deletes a character and all associated data.
+
+<ParamField path="character_id" type="i64" required>
+  Character to delete
+</ParamField>
+
+<ParamField path="account_id" type="i64" required>
+  Account ID for ownership verification
+</ParamField>
+
+<ResponseField name="deleted" type="bool">
+  True if character was deleted, false if not found or wrong owner
+</ResponseField>
+
+**Cascading Deletes:**
+- Quest progress
+- Quest flags
+- Quest availability
+- Arena stats
+- Friendships
+- Discovered recipes
+- Unlocked spells
+
+## Character Save/Load
+
+### save_character()
+
+```rust
+pub async fn save_character(
+    &self,
+    character_id: i64,
+    x: f32,
+    y: f32,
+    hp: i32,
+    prayer_points: i32,
+    mp: i32,
+    skills: &Skills,
+    gold: i32,
+    inventory_json: &str,
+    equipped_head: Option<&str>,
+    equipped_body: Option<&str>,
+    equipped_weapon: Option<&str>,
+    equipped_back: Option<&str>,
+    equipped_feet: Option<&str>,
+    equipped_ring: Option<&str>,
+    equipped_gloves: Option<&str>,
+    equipped_necklace: Option<&str>,
+    equipped_belt: Option<&str>,
+    played_time_delta: i64,
+    current_map: Option<&str>,
+    sitting_at_x: Option<i32>,
+    sitting_at_y: Option<i32>,
+    entrance_x: Option<f32>,
+    entrance_y: Option<f32>,
+    bank_json: &str,
+    bank_gold: i32,
+    bank_max_slots: u32,
+) -> Result<(), sqlx::Error>
+```
+
+Saves character state to database.
+
+**Saved Data:**
+- Position (x, y) and current map
+- HP, prayer points, mana
+- All skills (serialized to JSON)
+- Gold and inventory
+- All equipment slots
+- Sitting state and chair position
+- Interior entrance position
+- Bank contents and gold
+- Played time (incremented by delta)
+
+**Performance:**
+- Called periodically (e.g., every 30 seconds) and on logout
+- Single UPDATE query with all fields
+
+## Quest System
+
+### load_character_quest_state()
+
+```rust
+pub async fn load_character_quest_state(
+    &self,
+    character_id: i64,
+) -> Result<PlayerQuestState, sqlx::Error>
+```
+
+Loads all quest progress for a character.
+
+<ResponseField name="quest_state" type="PlayerQuestState">
+  Quest state containing active quests, completed quests, available quests, and flags
+</ResponseField>
+
+**Loaded Data:**
+- Active quests with objective progress
+- Completed quests with timestamps
+- Available quests (unlocked but not started)
+- Quest flags for script state
+
+---
+
+### save_character_quest_state()
+
+```rust
+pub async fn save_character_quest_state(
+    &self,
+    character_id: i64,
+    state: &PlayerQuestState,
+) -> Result<(), sqlx::Error>
+```
+
+Saves quest state to database.
+
+**Persistence:**
+- Upserts active quest progress (objectives as JSON)
+- Updates completed quest timestamps
+- Saves quest availability
+- Saves quest flags
+
+## Arena Stats
+
+### get_arena_stats()
+
+```rust
+pub async fn get_arena_stats(&self, character_id: i64) -> Result<ArenaStatsData, sqlx::Error>
+```
+
+Loads arena PvP statistics. Creates default row if none exists.
+
+<ResponseField name="stats" type="ArenaStatsData">
+  Arena stats containing wins, matches, kills, deaths, streaks, and gold won
+</ResponseField>
+
+---
+
+### update_arena_stats()
+
+```rust
+pub async fn update_arena_stats(
+    &self,
+    character_id: i64,
+    won: bool,
+    kills: i32,
+    died: bool,
+    gold_won: i32,
+) -> Result<(), sqlx::Error>
+```
+
+Updates arena stats after a match.
+
+<ParamField path="won" type="bool" required>
+  Whether player won the match
+</ParamField>
+
+<ParamField path="kills" type="i32" required>
+  Number of kills this match
+</ParamField>
+
+<ParamField path="died" type="bool" required>
+  Whether player died this match
+</ParamField>
+
+<ParamField path="gold_won" type="i32" required>
+  Gold earned from match
+</ParamField>
+
+**Streak Logic:**
+- Win: current_streak + 1, update best_streak if new record
+- Loss: current_streak = 0
+
+---
+
+### get_arena_leaderboard()
+
+```rust
+pub async fn get_arena_leaderboard(&self) -> Result<Vec<(String, i32, i32, i32)>, sqlx::Error>
+```
+
+Returns top 10 arena players.
+
+<ResponseField name="leaderboard" type="Vec<(String, i32, i32, i32)>">
+  List of (name, total_kills, total_wins, total_gold_won), ordered by wins then kills
+</ResponseField>
+
+## Farming System
+
+### save_farming_patch()
+
+```rust
+pub async fn save_farming_patch(
+    &self,
+    patch_id: &str,
+    player_id: &str,
+    crop_id: &str,
+    planted_at: u64,
+) -> Result<(), sqlx::Error>
+```
+
+Saves a planted crop to the database (per-player instanced).
+
+<ParamField path="patch_id" type="&str" required>
+  Patch identifier (e.g., "allotment_1")
+</ParamField>
+
+<ParamField path="player_id" type="&str" required>
+  Player who planted the crop
+</ParamField>
+
+<ParamField path="crop_id" type="&str" required>
+  Crop type (e.g., "potato")
+</ParamField>
+
+<ParamField path="planted_at" type="u64" required>
+  Timestamp when crop was planted (milliseconds)
+</ParamField>
+
+---
+
+### load_farming_patches()
+
+```rust
+pub async fn load_farming_patches(&self) -> Result<Vec<(String, String, String, u64)>, sqlx::Error>
+```
+
+Loads all planted patches from database.
+
+<ResponseField name="patches" type="Vec<(String, String, String, u64)>">
+  List of (patch_id, player_id, crop_id, planted_at)
+</ResponseField>
+
+---
+
+### save_plot_unlock()
+
+```rust
+pub async fn save_plot_unlock(&self, player_id: &str, plot_id: u32) -> Result<(), sqlx::Error>
+```
+
+Records that a player purchased a farming plot.
+
+---
+
+### load_plot_unlocks()
+
+```rust
+pub async fn load_plot_unlocks(&self) -> Result<Vec<(String, u32)>, sqlx::Error>
+```
+
+Loads all farming plot unlocks.
+
+<ResponseField name="unlocks" type="Vec<(String, u32)>">
+  List of (player_id, plot_id)
+</ResponseField>
+
+## Recipe and Spell Unlocks
+
+### save_discovered_recipe()
+
+```rust
+pub async fn save_discovered_recipe(
+    &self,
+    character_id: i64,
+    recipe_id: &str,
+) -> Result<(), sqlx::Error>
+```
+
+Records a recipe discovery (for recipes with `requires_discovery = true`).
+
+---
+
+### load_discovered_recipes()
+
+```rust
+pub async fn load_discovered_recipes(&self, character_id: i64) -> Result<Vec<String>, sqlx::Error>
+```
+
+Loads all discovered recipes for a character.
+
+---
+
+### save_unlocked_spell()
+
+```rust
+pub async fn save_unlocked_spell(
+    &self,
+    character_id: i64,
+    spell_id: &str,
+) -> Result<(), sqlx::Error>
+```
+
+Records a spell unlock (from using scroll items).
+
+---
+
+### load_unlocked_spells()
+
+```rust
+pub async fn load_unlocked_spells(&self, character_id: i64) -> Result<Vec<String>, sqlx::Error>
+```
+
+Loads all unlocked spells for a character.
+
+## Database Schema
+
+### accounts
+```sql
+CREATE TABLE accounts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT UNIQUE NOT NULL,
+    password_hash TEXT NOT NULL,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    last_login TEXT
+)
+```
+
+### characters
+```sql
+CREATE TABLE characters (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL,
+    name TEXT UNIQUE NOT NULL,
+    gender TEXT NOT NULL DEFAULT 'male',
+    skin TEXT NOT NULL DEFAULT 'tan',
+    hair_style INTEGER,
+    hair_color INTEGER,
+    x REAL DEFAULT -30.0,
+    y REAL DEFAULT 19.0,
+    hp INTEGER DEFAULT 10,
+    prayer_points INTEGER,
+    mp INTEGER,
+    gold INTEGER DEFAULT 0,
+    -- Equipment slots
+    equipped_head TEXT,
+    equipped_body TEXT,
+    equipped_weapon TEXT,
+    -- ... more equipment
+    inventory_json TEXT DEFAULT '[]',
+    skills_json TEXT,
+    bank_json TEXT DEFAULT '[]',
+    bank_gold INTEGER DEFAULT 0,
+    bank_max_slots INTEGER DEFAULT 50,
+    current_map TEXT,
+    played_time INTEGER DEFAULT 0,
+    is_admin BOOLEAN DEFAULT FALSE,
+    FOREIGN KEY (account_id) REFERENCES accounts(id)
+)
+```
+
+### character_quests
+```sql
+CREATE TABLE character_quests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    character_id INTEGER NOT NULL,
+    quest_id TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'active',
+    objectives_json TEXT DEFAULT '{}',
+    started_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    completed_at TEXT,
+    FOREIGN KEY(character_id) REFERENCES characters(id),
+    UNIQUE(character_id, quest_id)
+)
+```
+
+### arena_stats
+```sql
+CREATE TABLE arena_stats (
+    character_id INTEGER PRIMARY KEY,
+    total_wins INTEGER DEFAULT 0,
+    total_matches INTEGER DEFAULT 0,
+    total_kills INTEGER DEFAULT 0,
+    total_deaths INTEGER DEFAULT 0,
+    current_streak INTEGER DEFAULT 0,
+    best_streak INTEGER DEFAULT 0,
+    total_gold_won INTEGER DEFAULT 0,
+    FOREIGN KEY(character_id) REFERENCES characters(id)
+)
+```
+
+## Example Usage
+
+```rust
+use std::sync::Arc;
+
+// Initialize database
+let db = Arc::new(Database::new("sqlite://aeven.db").await?);
+
+// Create account
+let account_id = db.create_account("player1", "secure_password").await?;
+
+// Verify login
+if let Some(account) = db.verify_account_password("player1", "secure_password").await {
+    println!("Login successful! Account ID: {}", account.id);
+}
+
+// Create character
+let character = db.create_character(
+    account_id,
+    "Steve",
+    "male",
+    "tan",
+    Some(2),
+    Some(4),
+).await?;
+
+// Save character progress
+db.save_character(
+    character.id,
+    character.x,
+    character.y,
+    character.hp,
+    character.prayer_points,
+    character.mp,
+    &character.skills,
+    character.gold,
+    &character.inventory_json,
+    character.equipped_head.as_deref(),
+    // ... more fields
+).await?;
+
+// Load quest state
+let quest_state = db.load_character_quest_state(character.id).await?;
+println!("Active quests: {}", quest_state.active_quests.len());
+
+// Update arena stats
+db.update_arena_stats(character.id, true, 3, false, 100).await?;
+```
+
+## Related Types
+
+- [Player](/api/server/player) - Character data structure
+- [GameRoom](/api/server/game-room) - Uses database for persistence
+- [Items](/api/server/items) - Inventory serialization

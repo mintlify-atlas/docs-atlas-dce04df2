@@ -1,0 +1,377 @@
+---
+title: Combat System
+description: Real-time combat mechanics with melee, ranged, and attack cooldowns
+---
+
+Aeven features a **RuneScape-inspired** combat system with accuracy rolls, damage calculation, and equipment bonuses.
+
+## Combat Mechanics
+
+### Targeting
+
+Players target entities by left-clicking:
+
+```rust
+// From rust-server/src/game.rs
+pub target_id: Option<String>, // Currently targeted entity (player or NPC)
+```
+
+- **Left Click**: Target an enemy or player
+- **Space**: Attack the current target
+- **Escape**: Clear target
+
+<Note>
+Only attackable entities can be targeted for combat. Friendly NPCs, quest givers, merchants, altars, bankers, and slayer masters cannot be attacked.
+</Note>
+
+### Attack Range
+
+Combat has different range requirements for melee and ranged:
+
+```rust
+const ATTACK_RANGE: i32 = 1; // Melee: 1 tile (cardinal direction only)
+
+// Ranged weapons can have longer attack range
+pub attack_range: i32,  // From weapon equipment stats
+```
+
+**Range Validation**:
+- Must be in **cardinal direction** (not diagonal)
+- Distance must be ≤ weapon's attack range
+- Movement cooldown must be complete
+
+### Attack Cooldown
+
+Attacks have cooldowns to prevent spam:
+
+```rust
+const ATTACK_COOLDOWN_MS: u64 = 700;  // Melee: 700ms
+const RANGED_ATTACK_COOLDOWN_MS: u64 = 1000;  // Ranged: 1000ms (slower to balance range)
+
+pub last_attack_time: u64,  // Timestamp of last attack
+```
+
+<CodeGroup>
+```rust Player Attack
+// Server validates attack cooldown
+if current_time - player.last_attack_time >= attack_cooldown {
+    if is_in_attack_range(player, target) {
+        player.last_attack_time = current_time;
+        // Process damage calculation
+    }
+}
+```
+
+```rust NPC Attack
+// NPCs also respect attack cooldown
+let attack_ready = current_time - self.last_attack_time >= self.get_attack_cooldown_ms();
+if attack_ready {
+    self.last_attack_time = current_time;
+    self.just_attacked = true;  // Signal client animation
+    return Some((target_id, damage));
+}
+```
+</CodeGroup>
+
+## Damage Calculation
+
+### Accuracy Roll
+
+Combat uses a **two-roll system** (attacker accuracy vs defender defence):
+
+```rust
+// From rust-server/src/skills.rs
+pub fn calculate_hit(attacker_level: i32, attacker_bonus: i32, defender_level: i32, defender_bonus: i32) -> bool {
+    let mut rng = rand::thread_rng();
+    
+    // Attacker roll: 0 to (level + bonus)
+    let attack_roll = rng.gen_range(0..=(attacker_level + attacker_bonus));
+    
+    // Defender roll: 0 to (level + bonus)
+    let defence_roll = rng.gen_range(0..=(defender_level + defender_bonus));
+    
+    attack_roll > defence_roll  // Hit if attacker roll beats defender roll
+}
+```
+
+### Max Hit Calculation
+
+If the accuracy roll succeeds, damage is rolled:
+
+```rust
+pub fn calculate_max_hit(strength_level: i32, strength_bonus: i32) -> i32 {
+    // RuneScape-style max hit formula
+    let effective_strength = strength_level + strength_bonus;
+    let max_hit = ((effective_strength as f64 * 0.5 + 0.5).floor() as i32).max(1);
+    max_hit
+}
+
+pub fn roll_damage(max_hit: i32) -> i32 {
+    let mut rng = rand::thread_rng();
+    rng.gen_range(0..=max_hit)  // Random damage from 0 to max_hit
+}
+```
+
+### Equipment Bonuses
+
+Equipment provides combat bonuses:
+
+```rust
+// Player calculates total bonuses from all equipped items
+pub fn attack_bonus(&self, item_registry: &ItemRegistry) -> i32 {
+    let mut bonus = 0;
+    for equipped in self.all_equipped() {
+        if let Some(item_id) = equipped {
+            if let Some(def) = item_registry.get(item_id) {
+                if let Some(equip) = &def.equipment {
+                    bonus += equip.attack_bonus;
+                }
+            }
+        }
+    }
+    bonus + self.buff_bonus("attack")  // Add potion buffs
+}
+
+pub fn strength_bonus(&self, item_registry: &ItemRegistry) -> i32 {
+    // Similar calculation for strength bonus
+}
+
+pub fn defence_bonus(&self, item_registry: &ItemRegistry) -> i32 {
+    // Similar calculation for defence bonus
+}
+```
+
+## Combat Styles
+
+Players can choose combat styles that affect XP distribution:
+
+```rust
+pub enum CombatStyle {
+    Accurate,    // +4 XP/damage to Attack (melee) or Ranged (bow)
+    Aggressive,  // +4 XP/damage to Strength
+    Defensive,   // +4 XP/damage to Defence
+    Controlled,  // +1.33 XP/damage to Attack, Strength, Defence
+    Rapid,       // +4 XP/damage to Ranged (faster attacks)
+    Longrange,   // +2 XP/damage to Ranged, +2 XP/damage to Defence
+}
+```
+
+**XP Rates**:
+- **Focused styles** (Accurate/Aggressive/Defensive): 4 XP per damage
+- **Controlled**: 1.33 XP per damage to 3 skills
+- **Hitpoints**: Always 1.33 XP per damage dealt
+
+<CodeGroup>
+```rust Award Combat XP
+pub fn award_combat_xp(&mut self, damage: i32, style: CombatStyle, weapon_type: WeaponType) -> Vec<(SkillType, i64, i64, i32, bool)> {
+    let mut results = Vec::new();
+    
+    match style {
+        CombatStyle::Accurate => {
+            if weapon_type == WeaponType::Ranged {
+                let xp = (damage as f64 * 4.0) as i64;
+                let leveled = self.skills.ranged.add_xp(xp);
+                results.push((SkillType::Ranged, xp, self.skills.ranged.xp, self.skills.ranged.level, leveled));
+            } else {
+                let xp = (damage as f64 * 4.0) as i64;
+                let leveled = self.skills.attack.add_xp(xp);
+                results.push((SkillType::Attack, xp, self.skills.attack.xp, self.skills.attack.level, leveled));
+            }
+        }
+        CombatStyle::Controlled => {
+            let xp = (damage as f64 * 1.33) as i64;
+            for skill in [Attack, Strength, Defence] {
+                let leveled = skill.add_xp(xp);
+                results.push((skill_type, xp, skill.xp, skill.level, leveled));
+            }
+        }
+        // ... other styles
+    }
+    
+    // Always award Hitpoints XP
+    let hp_xp = (damage as f64 * 1.33) as i64;
+    let hp_leveled = self.skills.hitpoints.add_xp(hp_xp);
+    results.push((SkillType::Hitpoints, hp_xp, self.skills.hitpoints.xp, self.skills.hitpoints.level, hp_leveled));
+    
+    results
+}
+```
+</CodeGroup>
+
+## Health and Death
+
+### Health System
+
+Max HP is determined by the **Hitpoints** skill level:
+
+```rust
+pub fn max_hp(&self) -> i32 {
+    self.skills.hitpoints.level  // 1 HP per level (starts at 10)
+}
+```
+
+### Health Regeneration
+
+Players passively regenerate HP over time:
+
+```rust
+const PLAYER_HP_REGEN_PERCENT: f32 = 2.0;  // 2% of max HP
+const REGEN_INTERVAL_MS: u64 = 15000;  // Every 15 seconds
+
+pub fn apply_regen(&mut self, current_time: u64, hp_regen_multiplier: f32) {
+    if current_time - self.last_regen_time >= REGEN_INTERVAL_MS {
+        let regen = ((max_hp as f32 * 2.0) / 100.0).ceil().max(1.0);
+        self.hp = (self.hp + (regen * hp_regen_multiplier) as i32).min(max_hp);
+        self.last_regen_time = current_time;
+    }
+}
+```
+
+<Note>
+Prayers can boost HP regeneration by providing a multiplier to the base 2% regen rate.
+</Note>
+
+### Death and Respawn
+
+When a player's HP reaches 0:
+
+```rust
+const PLAYER_RESPAWN_TIME_MS: u64 = 5000;  // 5 seconds
+
+pub fn die(&mut self, current_time: u64) {
+    self.is_dead = true;
+    self.death_time = current_time;
+    self.hp = 0;
+    self.target_id = None;
+    self.active_prayers.clear();  // Deactivate all prayers
+}
+
+pub fn respawn(&mut self) -> Option<(i32, i32)> {
+    // Respawn at world spawn point
+    self.x = WORLD_SPAWN_X;  // (15, 4) in chunk 0,0
+    self.y = WORLD_SPAWN_Y;
+    self.hp = self.max_hp();
+    self.prayer_points = self.max_prayer_points();
+    self.mp = self.max_mp();
+    self.is_dead = false;
+}
+```
+
+**Death Mechanics**:
+- "You Died" overlay with 5-second countdown
+- Respawn at world spawn point (15, 4)
+- Full HP, prayer points, and mana restored
+- All active prayers deactivated
+- Items kept in inventory (no death penalty in current version)
+
+## NPC Combat
+
+### NPC Stats
+
+NPCs have level-scaled stats:
+
+```rust
+// From rust-server/src/npc.rs
+
+/// Scale NPC HP based on level (10% increase per level above 1)
+fn scale_hp(base_hp: i32, level: i32) -> i32 {
+    let multiplier = 1.0 + 0.10 * (level - 1).max(0) as f64;
+    (base_hp as f64 * multiplier).round() as i32
+}
+
+/// Scale NPC damage based on level (15% increase per level above 1)
+fn scale_damage(base_damage: i32, level: i32) -> i32 {
+    let multiplier = 1.0 + 0.15 * (level - 1).max(0) as f64;
+    (base_damage as f64 * multiplier).round() as i32
+}
+```
+
+### NPC AI States
+
+```rust
+pub enum NpcState {
+    Idle,       // Standing still, looking for targets
+    Chasing,    // Moving toward target
+    Attacking,  // In range, attacking target
+    Returning,  // Target lost, returning to spawn
+    Dead,       // Waiting to respawn
+    Wandering,  // Moving around spawn area
+}
+```
+
+**AI Behavior**:
+- **Idle**: Look for players within aggro range
+- **Chasing**: Move toward target (1 tile per move cooldown)
+- **Attacking**: Attack when in range and cooldown ready
+- **Returning**: Return to spawn if target too far or lost
+- **Wandering**: Passive NPCs wander within radius of spawn
+
+### NPC Aggro
+
+```rust
+// Hostile NPCs aggro on nearby players
+let aggro_range = self.get_aggro_range();  // From prototype
+for (player_id, px, py, hp) in players {
+    if hp > 0 {
+        let dist = grid_distance(self.x, self.y, px, py);
+        if dist <= aggro_range {
+            self.target_id = Some(player_id.clone());
+            self.state = NpcState::Chasing;
+        }
+    }
+}
+```
+
+### NPC Respawn
+
+```rust
+const NPC_RESPAWN_TIME_MS: u64 = 10000;  // 10 seconds (configurable per entity)
+
+pub fn respawn(&mut self) {
+    self.x = self.spawn_x;
+    self.y = self.spawn_y;
+    self.direction = self.spawn_direction;
+    self.hp = self.max_hp;
+    self.state = NpcState::Idle;
+    self.target_id = None;
+}
+```
+
+## Visual Feedback
+
+### Floating Damage Numbers
+
+Damage is displayed as floating text above targets:
+
+- Rise animation with fade out
+- Color-coded by damage source
+- Displayed for ~1 second
+
+### Health Bars
+
+All entities show health bars when damaged:
+
+- Green bar above entity
+- Fades to red as HP decreases
+- Shows current/max HP
+
+### Attack Animations
+
+The `just_attacked` flag syncs attack animations:
+
+```rust
+pub just_attacked: bool,  // True only on tick when NPC attacks
+```
+
+Clients play attack animation when this flag is set.
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Skills & Leveling" icon="chart-line" href="/features/skills">
+    XP and level progression
+  </Card>
+  <Card title="Items & Equipment" icon="shield" href="/features/items">
+    Weapons, armor, and bonuses
+  </Card>
+</CardGroup>

@@ -1,0 +1,503 @@
+---
+title: World & Map System
+description: Chunk-based world streaming and dynamic map loading
+---
+
+Aeven uses a **chunk-based world system** that dynamically loads map data as players explore, supporting unlimited world size with efficient memory usage.
+
+## Chunk System
+
+### Chunk Structure
+
+```rust
+// From rust-server/src/chunk.rs
+pub const CHUNK_SIZE: u32 = 32;  // 32x32 tiles per chunk
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ChunkCoord {
+    pub x: i32,
+    pub y: i32,
+}
+
+pub struct Chunk {
+    pub coord: ChunkCoord,
+    pub layers: Vec<ChunkLayer>,  // Ground, Objects, Overhead
+    pub collision: Vec<bool>,     // 32x32 collision map
+    pub map_objects: Vec<MapObject>,  // Trees, rocks, decorations
+    pub walls: Vec<Wall>,         // Wall edges
+    pub entity_spawns: Vec<EntitySpawn>,  // NPC spawn points
+    pub gathering_zones: Vec<GatheringZoneMarker>,  // Fishing/gathering areas
+    pub portals: Vec<Portal>,     // Map transitions
+}
+```
+
+**Chunk Layers**:
+1. **Ground**: Base terrain tiles
+2. **Objects**: Trees, rocks, buildings
+3. **Overhead**: Roofs, tree tops, shadows
+
+### Coordinate System
+
+```rust
+impl ChunkCoord {
+    /// Convert world position to chunk coordinate
+    pub fn from_world(world_x: i32, world_y: i32) -> Self {
+        Self {
+            x: world_x.div_euclid(CHUNK_SIZE as i32),
+            y: world_y.div_euclid(CHUNK_SIZE as i32),
+        }
+    }
+}
+
+/// Convert world position to local chunk position
+pub fn world_to_local(world_x: i32, world_y: i32) -> (u32, u32) {
+    (
+        world_x.rem_euclid(CHUNK_SIZE as i32) as u32,
+        world_y.rem_euclid(CHUNK_SIZE as i32) as u32,
+    )
+}
+
+/// Convert chunk + local position to world position
+pub fn local_to_world(chunk: ChunkCoord, local_x: u32, local_y: u32) -> (i32, i32) {
+    (
+        chunk.x * CHUNK_SIZE as i32 + local_x as i32,
+        chunk.y * CHUNK_SIZE as i32 + local_y as i32,
+    )
+}
+```
+
+**Example**:
+- World position (50, 75)
+- Chunk coordinate: (50 ÷ 32, 75 ÷ 32) = **(1, 2)**
+- Local position: (50 % 32, 75 % 32) = **(18, 11)**
+
+## Dynamic Loading
+
+### World Manager
+
+```rust
+// From rust-server/src/world.rs
+pub struct World {
+    chunks: RwLock<HashMap<ChunkCoord, Arc<Chunk>>>,  // Cached chunks
+    chunk_dir: String,  // "maps/world_0"
+    generate_missing: bool,  // Generate test chunks if missing
+}
+
+impl World {
+    /// Get or load a chunk at the given coordinates
+    pub async fn get_or_load_chunk(&self, coord: ChunkCoord) -> Option<Arc<Chunk>> {
+        // Check cache first
+        {
+            let chunks = self.chunks.read().await;
+            if let Some(chunk) = chunks.get(&coord) {
+                return Some(chunk.clone());
+            }
+        }
+        
+        // Try to load from file
+        let chunk = self.load_chunk_from_file(coord).await;
+        
+        if let Some(chunk) = chunk {
+            let chunk = Arc::new(chunk);
+            let mut chunks = self.chunks.write().await;
+            chunks.insert(coord, chunk.clone());
+            return Some(chunk);
+        }
+        
+        // Generate test chunk if enabled
+        if self.generate_missing {
+            let chunk = Arc::new(Chunk::new_test(coord));
+            let mut chunks = self.chunks.write().await;
+            chunks.insert(coord, chunk.clone());
+            return Some(chunk);
+        }
+        
+        None
+    }
+}
+```
+
+### Chunk Files
+
+Chunks are stored as JSON files:
+
+```
+maps/world_0/
+  chunk_0_0.json   # Spawn area
+  chunk_0_1.json
+  chunk_1_0.json
+  chunk_1_1.json
+  ...
+```
+
+**Simplified JSON Format** (v2+):
+
+```json
+{
+  "version": 2,
+  "size": 32,
+  "layers": {
+    "ground": [1, 1, 1, 2, 2, ...],     // 1024 tiles (32x32)
+    "objects": [0, 0, 45, 0, ...],      // 1024 tiles
+    "overhead": [0, 0, 0, 78, ...]
+  },
+  "collision": "base64_encoded_bitmask",  // 32x32 collision grid
+  "map_objects": [
+    {
+      "gid": 123,
+      "tile_x": 10,
+      "tile_y": 15,
+      "width": 64,
+      "height": 96
+    }
+  ],
+  "entity_spawns": [
+    {
+      "entity_id": "slime",
+      "world_x": 42,
+      "world_y": 18,
+      "level": 3,
+      "facing": "down"
+    }
+  ],
+  "portals": [
+    {
+      "x": 5,
+      "y": 8,
+      "width": 2,
+      "height": 1,
+      "target_map": "dark_cave",
+      "target_spawn": "entrance"
+    }
+  ]
+}
+```
+
+### Chunk Streaming
+
+The server tracks which chunk each player is in:
+
+```rust
+/// Track which chunk each player is in for streaming updates
+player_chunks: RwLock<HashMap<String, ChunkCoord>>,
+
+// When player moves to new chunk
+let new_chunk = ChunkCoord::from_world(player.x, player.y);
+if player_chunk != new_chunk {
+    // Preload neighboring chunks
+    for neighbor_coord in new_chunk.neighbors() {
+        world.get_or_load_chunk(neighbor_coord).await;
+    }
+    
+    player_chunks.insert(player_id.clone(), new_chunk);
+}
+```
+
+**Preloading Strategy**:
+- Load current chunk + 8 neighbors (3×3 grid)
+- Preload triggered when player crosses chunk boundary
+- Chunks cached in memory for fast access
+
+## Collision System
+
+### Collision Grid
+
+Each chunk has a 32×32 collision grid:
+
+```rust
+pub collision: Vec<bool>,  // 1024 bools (32*32)
+
+pub fn is_blocked(&self, local_x: u32, local_y: u32) -> bool {
+    let index = (local_y * CHUNK_SIZE + local_x) as usize;
+    self.collision.get(index).copied().unwrap_or(true)
+}
+```
+
+### Collision Sources
+
+1. **Tile Collision**: Ground tiles with collision property
+2. **Map Objects**: Trees, rocks, buildings (GID-based)
+3. **Walls**: Edge-based walls between tiles
+4. **Players/NPCs**: Dynamic entity blocking
+
+<CodeGroup>
+```rust Collision Check
+// Check if world position is walkable
+pub async fn is_walkable(&self, world_x: i32, world_y: i32) -> bool {
+    let chunk_coord = ChunkCoord::from_world(world_x, world_y);
+    let (local_x, local_y) = world_to_local(world_x, world_y);
+    
+    if let Some(chunk) = self.get_or_load_chunk(chunk_coord).await {
+        !chunk.is_blocked(local_x, local_y)
+    } else {
+        false  // Unknown chunks are blocked
+    }
+}
+```
+
+```rust Movement Validation
+// Server validates movement
+let new_x = player.x + dx;
+let new_y = player.y + dy;
+
+if !world.is_walkable(new_x, new_y).await {
+    return;  // Reject movement
+}
+
+if occupied_by_player_or_npc(new_x, new_y) {
+    return;  // Reject movement
+}
+
+player.x = new_x;
+player.y = new_y;
+```
+</CodeGroup>
+
+### Collision Ignore List
+
+Some objects don't block movement:
+
+```toml
+# data/collision_ignore.toml
+objects_first_gid = 1
+ignore_object_ids = [
+    45,  # Flowers
+    67,  # Small rocks
+    89,  # Grass decorations
+]
+```
+
+## Map Objects
+
+### Object Structure
+
+```rust
+pub struct MapObject {
+    pub gid: u32,        // Global tile ID from objects.tsx
+    pub tile_x: i32,     // World tile X
+    pub tile_y: i32,     // World tile Y
+    pub width: u32,      // Sprite width in pixels
+    pub height: u32,     // Sprite height in pixels
+}
+```
+
+**Examples**:
+- **Trees**: 64×96 px sprites for oak, pine, willow
+- **Rocks**: 64×64 px sprites for copper, iron, gold ore
+- **Buildings**: 128×128 px or larger for houses, shops
+
+### Walls
+
+```rust
+pub enum WallEdge {
+    Down,   // Bottom edge of tile
+    Right,  // Right edge of tile
+}
+
+pub struct Wall {
+    pub gid: u32,        // Wall sprite GID
+    pub tile_x: i32,     // Tile position
+    pub tile_y: i32,
+    pub edge: WallEdge,  // Which edge
+}
+```
+
+Walls are rendered on tile edges for isometric perspective.
+
+## Entity Spawns
+
+### Spawn Points
+
+```rust
+pub struct EntitySpawn {
+    pub entity_id: String,  // Prototype ID (e.g., "slime", "pig")
+    pub world_x: i32,
+    pub world_y: i32,
+    pub level: Option<i32>,  // Override prototype level
+    pub respawn: bool,       // Respawn after death
+    pub respawn_time_override: Option<u64>,
+    pub facing: Option<String>,  // Initial direction
+    pub unique_id: Option<String>,  // For quest targets
+}
+```
+
+**Spawn Loading**:
+
+```rust
+// Server discovers all chunks and spawns NPCs
+let chunk_coords = world.discover_chunk_coords();
+for coord in &chunk_coords {
+    if let Some(chunk) = world.get_or_load_chunk(*coord).await {
+        for spawn in &chunk.entity_spawns {
+            if let Some(prototype) = entity_registry.get(&spawn.entity_id) {
+                let npc = Npc::from_prototype(
+                    &npc_id,
+                    &spawn.entity_id,
+                    prototype,
+                    spawn.world_x,
+                    spawn.world_y,
+                    spawn.level.unwrap_or(prototype.stats.level),
+                    spawn.facing.as_deref(),
+                );
+                npcs.insert(npc_id, npc);
+            }
+        }
+    }
+}
+```
+
+## Portals & Map Transitions
+
+### Portal Structure
+
+```rust
+pub struct Portal {
+    pub id: String,
+    pub x: i32,          // Local chunk X
+    pub y: i32,          // Local chunk Y
+    pub width: i32,      // Portal size
+    pub height: i32,
+    pub target_map: String,    // "dark_cave", "dungeon_1"
+    pub target_spawn: String,  // "entrance", "exit"
+}
+```
+
+**Portal Mechanics**:
+
+```rust
+// When player steps on portal tile
+for portal in &chunk.portals {
+    if player.x >= portal.x && player.x < portal.x + portal.width &&
+       player.y >= portal.y && player.y < portal.y + portal.height {
+        // Teleport player to target map
+        transition_to_interior(
+            player_id,
+            &portal.target_map,
+            &portal.target_spawn
+        );
+    }
+}
+```
+
+### Interior Maps
+
+Interiors are separate map files with their own chunks:
+
+```
+maps/
+  world_0/          # Overworld chunks
+  dark_cave/        # Cave interior chunks
+  dungeon_1/        # Dungeon chunks
+  player_house/     # Player housing
+```
+
+**Transition Example**:
+
+```rust
+// Enter dark cave
+Portal {
+    target_map: "dark_cave",
+    target_spawn: "entrance",
+}
+
+// Cave has exit portal back to overworld
+Portal {
+    target_map: "world_0",
+    target_spawn: "cave_exit",  // Defined in spawn points
+}
+```
+
+## Isometric Rendering
+
+### World to Screen Transformation
+
+```rust
+// From client rendering code
+const TILE_WIDTH: f32 = 64.0;
+const TILE_HEIGHT: f32 = 32.0;  // 2:1 isometric ratio
+
+// Convert world (grid) coordinates to screen (isometric) coordinates
+fn world_to_screen(world_x: f32, world_y: f32) -> (f32, f32) {
+    let screen_x = (world_x - world_y) * (TILE_WIDTH / 2.0);
+    let screen_y = (world_x + world_y) * (TILE_HEIGHT / 2.0);
+    (screen_x, screen_y)
+}
+```
+
+### Depth Sorting (Painter's Algorithm)
+
+Entities are sorted by Y position before rendering:
+
+```rust
+// Sort by Y coordinate (back to front)
+entities.sort_by_key(|e| e.y);
+
+// Render in order
+for entity in entities {
+    let (screen_x, screen_y) = world_to_screen(entity.x, entity.y);
+    render_sprite(entity.sprite, screen_x, screen_y);
+}
+```
+
+## Spawn Points
+
+### World Spawn
+
+```rust
+// From rust-server/src/game.rs
+pub const WORLD_SPAWN_X: i32 = 15;
+pub const WORLD_SPAWN_Y: i32 = 4;
+pub const SPAWN_PRELOAD_RADIUS: i32 = 3;  // Preload 3 chunks around spawn
+```
+
+**Spawn Behavior**:
+- New players spawn at (15, 4) in chunk (0, 0)
+- Dead players respawn at world spawn
+- Server preloads 3×3 chunk grid around spawn at startup
+
+### Custom Spawn Points
+
+Interiors define custom spawn points:
+
+```json
+// In dark_cave/chunk_0_0.json
+{
+  "spawn_points": {
+    "entrance": { "x": 5, "y": 8 },
+    "boss_room": { "x": 50, "y": 30 }
+  }
+}
+```
+
+## Performance
+
+### Memory Management
+
+- **Chunk Caching**: Chunks cached in `HashMap<ChunkCoord, Arc<Chunk>>`
+- **Reference Counting**: `Arc` allows cheap cloning for multiple references
+- **Async Loading**: Chunks loaded asynchronously without blocking game loop
+
+### View Distance Culling
+
+```rust
+const VIEW_DISTANCE: i32 = 40;  // Only sync entities within 40 tiles
+
+// Filter entities for StateSync
+let nearby_players = players
+    .iter()
+    .filter(|p| {
+        let dist = (p.x - player.x).abs().max((p.y - player.y).abs());
+        dist <= VIEW_DISTANCE
+    });
+```
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Multiplayer" icon="users" href="/features/multiplayer">
+    Chunk streaming and state synchronization
+  </Card>
+  <Card title="Items & Inventory" icon="backpack" href="/features/items">
+    Ground items and map objects
+  </Card>
+</CardGroup>

@@ -1,0 +1,752 @@
+---
+title: 'Server Architecture'
+description: 'Server-side structure and game loop'
+---
+
+The Aeven server is built with Axum and Tokio, handling authentication, game logic, and persistence.
+
+## Server Structure
+
+The server is organized into modules:
+
+```
+rust-server/src/
+├── main.rs              # Entry point, Axum router, WebSocket handling
+├── game.rs              # GameRoom, tick loop, combat, movement
+├── db.rs                # Database (SQLite + sqlx)
+├── protocol.rs          # Message types (Client/ServerMessage)
+├── npc.rs               # NPC AI, state machine
+├── item.rs              # Inventory, ground items, loot
+├── tilemap.rs           # Collision detection
+├── chunk.rs             # Chunk loading and streaming
+├── quest.rs             # Quest system, Lua scripting
+├── crafting/            # Crafting recipes and stations
+├── skills.rs            # Skills, XP, leveling
+├── prayer.rs            # Prayer system
+├── spell.rs             # Spell casting
+├── instance.rs          # Instance management (interiors)
+├── interior.rs          # Interior map loading
+├── arena.rs             # PvP arena
+├── farming.rs           # Farming patches and contracts
+├── mining.rs            # Mining system
+├── woodcutting.rs       # Woodcutting system
+├── slayer.rs            # Slayer tasks
+├── shop.rs              # NPC shops
+└── data/                # Registries for entities, items, recipes
+```
+
+## Application State
+
+The server uses `Arc<AppState>` for shared state across async tasks:
+
+```rust
+#[derive(Clone)]
+struct AppState {
+    // Game rooms (one per world/lobby)
+    rooms: Arc<DashMap<String, Arc<GameRoom>>>,
+
+    // Active sessions (session_id -> character info)
+    sessions: Arc<DashMap<String, GameSession>>,
+
+    // Auth tokens (token -> (account_id, username))
+    auth_sessions: Arc<DashMap<String, (i64, String)>>,
+
+    // Database connection pool
+    db: Arc<Database>,
+
+    // Game data registries (loaded from TOML at startup)
+    entity_registry: Arc<EntityRegistry>,
+    item_registry: Arc<ItemRegistry>,
+    quest_registry: Arc<QuestRegistry>,
+    crafting_registry: Arc<CraftingRegistry>,
+    prayer_registry: Arc<PrayerRegistry>,
+    interior_registry: Arc<InteriorRegistry>,
+    chest_registry: Arc<ChestRegistry>,
+
+    // Instance management (dungeons, houses)
+    instance_manager: Arc<InstanceManager>,
+
+    // Security: rate limiters, token signer
+    auth_rate_limiter: RateLimiter,
+    matchmake_rate_limiter: RateLimiter,
+    token_signer: SessionTokenSigner,
+
+    // Tracking
+    online_characters: Arc<DashSet<i64>>,
+    player_instances: Arc<RwLock<HashMap<String, String>>>,
+}
+```
+
+### DashMap for Concurrency
+
+`DashMap` provides thread-safe concurrent HashMap access:
+
+```rust
+// Multiple tasks can read/write concurrently without blocking
+rooms.insert(room_id, room);  // No lock needed
+let room = rooms.get(&room_id);  // Concurrent reads OK
+```
+
+## Game Loop
+
+The server runs a 20 Hz tick loop in a background task:
+
+```rust
+#[tokio::main]
+async fn main() {
+    let state = AppState::new().await;
+
+    // Spawn game tick loop
+    tokio::spawn(game_tick_loop(state.clone()));
+
+    // Spawn auto-save loop
+    tokio::spawn(auto_save_loop(state.clone()));
+
+    // Start HTTP/WebSocket server
+    let app = Router::new()
+        .route("/api/register", post(register_account))
+        .route("/api/login", post(login_account))
+        .route("/matchmake/joinOrCreate/:room", post(matchmake_join_or_create))
+        .route("/:room_id", get(websocket_handler))
+        .with_state(state);
+
+    axum::serve(listener, app).await.unwrap();
+}
+```
+
+### Tick Loop
+
+Every 50ms, the server processes game logic:
+
+```rust
+async fn game_tick_loop(state: Arc<AppState>) {
+    let mut interval = tokio::time::interval(Duration::from_millis(50));
+    loop {
+        interval.tick().await;
+
+        for room in state.rooms.iter() {
+            room.tick().await;
+        }
+    }
+}
+```
+
+### GameRoom::tick
+
+The tick function orchestrates all game systems:
+
+```rust
+impl GameRoom {
+    pub async fn tick(&self) {
+        let tick = self.tick_counter.fetch_add(1, Ordering::Relaxed);
+
+        // 1. Process movement for all players
+        self.tick_movement().await;
+
+        // 2. Process NPC AI and combat
+        self.tick_npcs().await;
+
+        // 3. Process player combat cooldowns
+        self.tick_combat().await;
+
+        // 4. Process crafting, gathering, sitting
+        self.tick_crafting().await;
+        self.tick_woodcutting().await;
+        self.tick_mining().await;
+
+        // 5. Process respawns (NPCs, items)
+        self.tick_respawns().await;
+
+        // 6. Process item despawns
+        self.tick_item_despawns().await;
+
+        // 7. HP/Prayer/MP regeneration
+        if tick % REGEN_INTERVAL_TICKS == 0 {
+            self.tick_regeneration().await;
+        }
+
+        // 8. Prayer drain
+        if tick % PRAYER_DRAIN_INTERVAL_TICKS == 0 {
+            self.tick_prayer_drain().await;
+        }
+
+        // 9. Broadcast state to all clients
+        self.broadcast_state_sync(tick).await;
+    }
+}
+```
+
+## WebSocket Handling
+
+Each WebSocket connection spawns two tasks:
+
+```rust
+async fn handle_socket(
+    ws: WebSocket,
+    session: GameSession,
+    room: Arc<GameRoom>,
+    state: Arc<AppState>,
+) {
+    let (mut ws_tx, mut ws_rx) = ws.split();
+
+    // Create channels
+    let (player_tx, mut player_rx) = mpsc::channel(64);
+    let mut broadcast_rx = room.broadcast_tx.subscribe();
+
+    // Register player sender
+    room.register_player_sender(&player_id, player_tx).await;
+
+    // Send initial data (welcome, definitions, existing players)
+    send_welcome(&mut ws_tx, &session, &room).await;
+
+    // Spawn send task
+    let send_task = tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                // Room-wide broadcasts (StateSync, events)
+                Ok(msg) = broadcast_rx.recv() => {
+                    send_message(&mut ws_tx, &msg).await;
+                }
+                // Direct messages to this player
+                Some(msg) = player_rx.recv() => {
+                    send_message(&mut ws_tx, &msg).await;
+                }
+            }
+        }
+    });
+
+    // Spawn recv task
+    let recv_task = tokio::spawn(async move {
+        while let Some(Ok(msg)) = ws_rx.next().await {
+            let bytes = msg.into_data();
+            let client_msg = decode_client_message(&bytes);
+            handle_client_message(client_msg, &session, &room, &state).await;
+        }
+    });
+
+    // Wait for disconnect
+    tokio::select! {
+        _ = send_task => {},
+        _ = recv_task => {},
+    }
+
+    // Cleanup on disconnect
+    on_disconnect(&session, &room, &state).await;
+}
+```
+
+### Message Dispatch
+
+Client messages are dispatched to handlers:
+
+```rust
+async fn handle_client_message(
+    msg: ClientMessage,
+    session: &GameSession,
+    room: &GameRoom,
+    state: &AppState,
+) {
+    match msg {
+        ClientMessage::Move { dx, dy, seq } => {
+            room.handle_move(&session.player_id, dx, dy, seq).await;
+        }
+        ClientMessage::Attack => {
+            room.handle_attack(&session.player_id).await;
+        }
+        ClientMessage::Pickup { item_id } => {
+            room.handle_pickup(&session.player_id, &item_id).await;
+        }
+        ClientMessage::StartCraft { recipe_id } => {
+            room.handle_craft_start(&session.player_id, &recipe_id).await;
+        }
+        // ... 50+ message types
+    }
+}
+```
+
+## Movement System
+
+Movement is grid-based with validation:
+
+```rust
+impl GameRoom {
+    pub async fn handle_move(&self, player_id: &str, dx: f32, dy: f32, seq: Option<u32>) {
+        let mut players = self.players.write().await;
+        let Some(player) = players.get_mut(player_id) else { return };
+
+        // Normalize to -1, 0, or 1
+        let dx = dx.signum() as i32;
+        let dy = dy.signum() as i32;
+
+        // Record move intent and timestamp
+        player.move_intent = (dx, dy);
+        player.last_move_input = Instant::now();
+
+        // Sequence tracking for client prediction
+        if let Some(seq) = seq {
+            player.last_move_seq = seq;
+        }
+    }
+
+    async fn tick_movement(&self) {
+        let mut players = self.players.write().await;
+        let tick = self.tick_counter.load(Ordering::Relaxed);
+
+        for player in players.values_mut() {
+            // Clear stale intents (prevents stuck movement)
+            if player.last_move_input.elapsed() > Duration::from_millis(700) {
+                player.move_intent = (0, 0);
+            }
+
+            let (dx, dy) = player.move_intent;
+            if dx == 0 && dy == 0 { continue; }
+
+            // Check cooldown (5 ticks = 250ms)
+            if tick - player.last_move_tick < MOVE_COOLDOWN_TICKS {
+                continue;
+            }
+
+            let new_x = player.x + dx;
+            let new_y = player.y + dy;
+
+            // Validate collision
+            if !self.tilemap.is_tile_walkable(new_x, new_y) {
+                continue;
+            }
+
+            // Update position
+            player.x = new_x;
+            player.y = new_y;
+            player.last_move_tick = tick;
+            player.direction = direction_from_delta(dx, dy);
+
+            // Post-movement checks (enter portals, trigger events)
+            self.handle_post_movement(player_id).await;
+        }
+    }
+}
+```
+
+## Combat System
+
+Combat is resolved server-side with dice rolls:
+
+```rust
+impl GameRoom {
+    pub async fn handle_attack(&self, player_id: &str) {
+        let mut players = self.players.write().await;
+        let Some(attacker) = players.get_mut(player_id) else { return };
+
+        // Check cooldown
+        let cooldown = if attacker.is_ranged() { 
+            RANGED_ATTACK_COOLDOWN_MS 
+        } else { 
+            ATTACK_COOLDOWN_MS 
+        };
+        if attacker.last_attack.elapsed() < Duration::from_millis(cooldown) {
+            return;
+        }
+
+        // Find target in front of attacker
+        let (tx, ty) = attacker.facing_tile();
+        let target_id = self.find_npc_at(tx, ty).await;
+        let Some(target_id) = target_id else { return };
+
+        attacker.last_attack = Instant::now();
+
+        // Roll to hit
+        let hit = calculate_hit(
+            attacker.skills.attack_level,
+            attacker.attack_bonus(),
+            target.defence_level,
+            target.defence_bonus,
+        );
+
+        if !hit {
+            self.broadcast(ServerMessage::DamageEvent {
+                source_id: player_id.to_string(),
+                target_id: target_id.clone(),
+                damage: 0,  // Miss
+                target_hp: target.hp,
+                target_x: target.x as f32,
+                target_y: target.y as f32,
+            }).await;
+            return;
+        }
+
+        // Roll damage
+        let max_hit = calculate_max_hit(
+            attacker.skills.strength_level,
+            attacker.strength_bonus(),
+        );
+        let damage = roll_damage(max_hit);
+
+        // Apply damage
+        let mut npcs = self.npcs.write().await;
+        let Some(target) = npcs.get_mut(&target_id) else { return };
+        target.hp = (target.hp - damage).max(0);
+
+        // Broadcast damage event
+        self.broadcast(ServerMessage::DamageEvent {
+            source_id: player_id.to_string(),
+            target_id: target_id.clone(),
+            damage,
+            target_hp: target.hp,
+            target_x: target.x as f32,
+            target_y: target.y as f32,
+        }).await;
+
+        // Award XP
+        let xp_gained = (damage as i64) * 4;
+        attacker.skills.add_attack_xp(xp_gained);
+
+        // Check for death
+        if target.hp <= 0 {
+            self.handle_npc_death(&target_id, player_id).await;
+        }
+    }
+}
+```
+
+## NPC AI
+
+NPCs use a simple state machine:
+
+```rust
+#[derive(Debug, Clone, PartialEq)]
+pub enum NpcState {
+    Idle,
+    Wandering,
+    Chasing { target_id: String },
+    Attacking { target_id: String },
+    Returning,
+    Dead,
+}
+
+impl GameRoom {
+    async fn tick_npcs(&self) {
+        let mut npcs = self.npcs.write().await;
+        let players = self.players.read().await;
+
+        for npc in npcs.values_mut() {
+            match npc.state {
+                NpcState::Idle => {
+                    // Check for nearby players (aggro range)
+                    if let Some(target) = self.find_nearest_player(npc, &players) {
+                        npc.state = NpcState::Chasing { target_id: target };
+                    } else if npc.wanders && rand::random::<f32>() < 0.05 {
+                        npc.state = NpcState::Wandering;
+                    }
+                }
+                NpcState::Wandering => {
+                    // Random walk
+                    if rand::random::<f32>() < 0.3 {
+                        let dx = rand::random::<i32>() % 3 - 1;
+                        let dy = rand::random::<i32>() % 3 - 1;
+                        npc.move_by(dx, dy);
+                    }
+                }
+                NpcState::Chasing { ref target_id } => {
+                    // Move toward target
+                    if let Some(target) = players.get(target_id) {
+                        let dist = npc.distance_to(target.x, target.y);
+                        if dist <= 1 {
+                            npc.state = NpcState::Attacking { target_id: target_id.clone() };
+                        } else {
+                            npc.move_toward(target.x, target.y);
+                        }
+                    } else {
+                        npc.state = NpcState::Returning;
+                    }
+                }
+                NpcState::Attacking { ref target_id } => {
+                    // Attack target
+                    self.npc_attack(npc, target_id, &mut players).await;
+                }
+                NpcState::Returning => {
+                    // Walk back to spawn
+                    if npc.at_spawn() {
+                        npc.state = NpcState::Idle;
+                    } else {
+                        npc.move_toward(npc.spawn_x, npc.spawn_y);
+                    }
+                }
+                NpcState::Dead => {
+                    // Handled by respawn system
+                }
+            }
+        }
+    }
+}
+```
+
+## Persistence
+
+The server uses SQLite with sqlx for type-safe queries:
+
+```rust
+impl Database {
+    pub async fn save_player(&self, character_id: i64, save: &PlayerSaveData) -> Result<()> {
+        sqlx::query(
+            "UPDATE characters SET 
+             x = ?, y = ?, hp = ?, gold = ?, 
+             inventory_json = ?, skills_json = ?, 
+             equipped_weapon = ?, equipped_head = ?, 
+             current_map = ?, entrance_x = ?, entrance_y = ?
+             WHERE id = ?"
+        )
+        .bind(save.x)
+        .bind(save.y)
+        .bind(save.hp)
+        .bind(save.gold)
+        .bind(&save.inventory_json)
+        .bind(&save.skills_json)
+        .bind(&save.equipped_weapon)
+        .bind(&save.equipped_head)
+        .bind(&save.current_map)
+        .bind(save.entrance_x)
+        .bind(save.entrance_y)
+        .bind(character_id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    pub async fn load_character(&self, character_id: i64) -> Result<CharacterData> {
+        let row = sqlx::query(
+            "SELECT * FROM characters WHERE id = ?"
+        )
+        .bind(character_id)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(CharacterData {
+            id: row.get("id"),
+            name: row.get("name"),
+            x: row.get("x"),
+            y: row.get("y"),
+            hp: row.get("hp"),
+            gold: row.get("gold"),
+            inventory_json: row.get("inventory_json"),
+            skills: Skills::from_json(row.get("skills_json")),
+            // ... all fields
+        })
+    }
+}
+```
+
+### Auto-Save Loop
+
+Every 30 seconds, save all online players:
+
+```rust
+async fn auto_save_loop(state: Arc<AppState>) {
+    let mut interval = tokio::time::interval(Duration::from_secs(30));
+    loop {
+        interval.tick().await;
+
+        for session in state.sessions.iter() {
+            let room = state.rooms.get(&session.room_id);
+            let save_data = room.get_player_save_data(&session.player_id).await;
+            state.db.save_player(session.character_id, &save_data).await;
+        }
+    }
+}
+```
+
+## Quest System
+
+Quests are defined in TOML and use Lua scripts for dialogue:
+
+```toml
+# data/quests/tutorial_quest.toml
+id = "tutorial_quest"
+name = "Getting Started"
+level_required = 1
+giver_npc = "npc_elder"
+
+[[objectives]]
+id = "talk_to_elder"
+type = "talk"
+target = "npc_elder"
+
+[[objectives]]
+id = "kill_goblins"
+type = "kill"
+target = "goblin"
+count = 5
+```
+
+Lua script handles dialogue branches:
+
+```lua
+-- data/quests/tutorial_quest.lua
+function on_interact(player, npc)
+    if player:has_completed("tutorial_quest") then
+        npc:say("Well done, adventurer!")
+    elseif player:has_active("tutorial_quest") then
+        if player:objective_complete("kill_goblins") then
+            npc:say("You've proven yourself! Here's your reward.")
+            player:complete_quest("tutorial_quest")
+            player:add_xp("combat", 100)
+        else
+            npc:say("Go kill 5 goblins to the east.")
+        end
+    else
+        npc:say("Welcome! I need your help.")
+        npc:offer_quest("tutorial_quest")
+    end
+end
+```
+
+## Broadcasting
+
+The server uses Tokio's broadcast channel for room-wide messages:
+
+```rust
+impl GameRoom {
+    pub async fn broadcast(&self, msg: ServerMessage) {
+        // Send to all connected players in this room
+        self.broadcast_tx.send(msg).ok();
+    }
+
+    pub async fn send_to_player(&self, player_id: &str, msg: ServerMessage) {
+        // Send to specific player via their direct channel
+        if let Some(tx) = self.player_senders.get(player_id) {
+            tx.send(msg).await.ok();
+        }
+    }
+}
+```
+
+### View Distance Culling
+
+StateSync only includes nearby entities:
+
+```rust
+const VIEW_DISTANCE: i32 = 40;
+
+async fn broadcast_state_sync(&self, tick: u64) {
+    let players = self.players.read().await;
+    let npcs = self.npcs.read().await;
+
+    for (viewer_id, viewer) in players.iter() {
+        // Filter players within view distance
+        let nearby_players: Vec<PlayerUpdate> = players
+            .iter()
+            .filter(|(_, p)| {
+                (p.x - viewer.x).abs() <= VIEW_DISTANCE &&
+                (p.y - viewer.y).abs() <= VIEW_DISTANCE
+            })
+            .map(|(_, p)| p.to_update())
+            .collect();
+
+        // Filter NPCs within view distance
+        let nearby_npcs: Vec<NpcUpdate> = npcs
+            .iter()
+            .filter(|(_, n)| {
+                (n.x - viewer.x).abs() <= VIEW_DISTANCE &&
+                (n.y - viewer.y).abs() <= VIEW_DISTANCE
+            })
+            .map(|(_, n)| n.to_update())
+            .collect();
+
+        self.send_to_player(viewer_id, ServerMessage::StateSync {
+            tick,
+            players: nearby_players,
+            npcs: nearby_npcs,
+            instance_id: self.instance_id.clone(),
+        }).await;
+    }
+}
+```
+
+## Security
+
+### Password Hashing
+
+Passwords are hashed with Argon2:
+
+```rust
+use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
+
+impl Database {
+    pub async fn create_account(&self, username: &str, password: &str) -> Result<i64> {
+        let salt = SaltString::generate(&mut OsRng);
+        let argon2 = Argon2::default();
+        let password_hash = argon2.hash_password(password.as_bytes(), &salt)?
+            .to_string();
+
+        let id = sqlx::query("INSERT INTO accounts (username, password_hash) VALUES (?, ?)")
+            .bind(username)
+            .bind(&password_hash)
+            .execute(&self.pool)
+            .await?
+            .last_insert_rowid();
+
+        Ok(id)
+    }
+}
+```
+
+### Rate Limiting
+
+IP-based rate limiting for auth endpoints:
+
+```rust
+struct RateLimiter {
+    entries: Arc<DashMap<String, (u32, Instant)>>,
+    max_requests: u32,
+    window_duration: Duration,
+}
+
+impl RateLimiter {
+    fn check(&self, ip: &str) -> bool {
+        let now = Instant::now();
+        let mut entry = self.entries.entry(ip).or_insert((0, now));
+
+        // Reset window if expired
+        if now.duration_since(entry.1) > self.window_duration {
+            *entry = (0, now);
+        }
+
+        // Check limit
+        if entry.0 >= self.max_requests {
+            return false;
+        }
+
+        entry.0 += 1;
+        true
+    }
+}
+```
+
+### Signed Session Tokens
+
+Matchmaking tokens are HMAC-signed to prevent hijacking:
+
+```rust
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
+
+type HmacSha256 = Hmac<Sha256>;
+
+impl SessionTokenSigner {
+    fn create_token(&self, session_id: &str, room_id: &str) -> String {
+        let expiry = now() + 300;  // 5 minutes
+        let payload = format!("{}:{}:{}", session_id, room_id, expiry);
+
+        let mut mac = HmacSha256::new_from_slice(&self.secret).unwrap();
+        mac.update(payload.as_bytes());
+        let signature = mac.finalize().into_bytes();
+
+        base64::encode(format!("{}:{}", payload, base64::encode(signature)))
+    }
+
+    fn validate_token(&self, token: &str) -> Option<(String, String)> {
+        // Decode, verify signature, check expiry
+        // Returns (session_id, room_id) if valid
+    }
+}
+```

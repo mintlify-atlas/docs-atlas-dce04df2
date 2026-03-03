@@ -1,0 +1,203 @@
+---
+title: 'Building'
+description: 'Build instructions for server, client, and WASM'
+---
+
+Aeven is built with Rust and requires Cargo for compilation. The project supports multiple build targets: server, native client, and WASM (web).
+
+## Prerequisites
+
+- **Rust**: Install from [rustup.rs](https://rustup.rs/)
+- **Cargo**: Comes with Rust installation
+- **SQLite**: Required for server database (included in most systems)
+
+## Building the Server
+
+The server is a Rust Axum application with WebSocket support and SQLite persistence.
+
+<Steps>
+  <Step title="Navigate to server directory">
+    ```bash
+    cd rust-server
+    ```
+  </Step>
+
+  <Step title="Build in release mode">
+    ```bash
+    cargo build --release
+    ```
+
+    Or run directly:
+    ```bash
+    cargo run --release
+    ```
+  </Step>
+
+  <Step title="Server starts">
+    The server will start on `http://localhost:2567` by default.
+
+    On startup, it will:
+    - Initialize the SQLite database (`game.db`)
+    - Load entity, item, quest, and crafting registries from `data/` TOML files
+    - Load interior maps from `maps/interiors/`
+    - Start the tick loop at 20 Hz
+  </Step>
+</Steps>
+
+### Server Configuration
+
+The server loads game data from:
+
+- `data/*.toml` - Entity, item, recipe, prayer definitions
+- `maps/interiors/*.json` - Interior map data (Tiled format)
+- `game.db` - SQLite database for accounts, characters, and saves
+
+## Building the Client
+
+The client is a Macroquad application that runs natively on desktop platforms.
+
+<Steps>
+  <Step title="Navigate to client directory">
+    ```bash
+    cd client
+    ```
+  </Step>
+
+  <Step title="Build in release mode">
+    ```bash
+    cargo build --release
+    ```
+
+    Or run directly:
+    ```bash
+    cargo run --release
+    ```
+  </Step>
+
+  <Step title="Client launches">
+    The client will:
+    - Connect to `wss://aeven.xyz` by default (or `ws://localhost:2567` in dev mode)
+    - Display the login screen with auth flow
+    - Load assets and initialize the Macroquad renderer
+  </Step>
+</Steps>
+
+### Client Build Modes
+
+**Native Client** (`cargo run --release`):
+- Full authentication flow
+- Character creation and selection
+- Persistent settings
+- Audio support
+
+**Guest Mode** (Dev only, `DEV_MODE = true` in `main.rs`):
+- Bypasses authentication
+- Useful for local testing
+- No character persistence
+
+## Building for WASM
+
+The client can be compiled to WebAssembly for browser deployment.
+
+<Steps>
+  <Step title="Add WASM target">
+    ```bash
+    rustup target add wasm32-unknown-unknown
+    ```
+  </Step>
+
+  <Step title="Navigate to client directory">
+    ```bash
+    cd client
+    ```
+  </Step>
+
+  <Step title="Build for WASM">
+    ```bash
+    cargo build --target wasm32-unknown-unknown --profile release-wasm
+    ```
+
+    The WASM binary will be output to:
+    ```
+    target/wasm32-unknown-unknown/release-wasm/aeven.wasm
+    ```
+  </Step>
+
+  <Step title="Deploy with HTML">
+    The WASM build requires a minimal HTML wrapper:
+
+    ```html
+    <canvas id="glcanvas" tabindex='1'></canvas>
+    <script src="aeven.js"></script>
+    ```
+
+    Macroquad generates the loader script automatically.
+  </Step>
+</Steps>
+
+### WASM Build Profile
+
+The `release-wasm` profile is defined in `Cargo.toml`:
+
+```toml
+[profile.release-wasm]
+inherits = "release"
+opt-level = "z"        # Optimize for size
+lto = true             # Link-time optimization
+strip = true           # Remove debug symbols
+```
+
+## Development Tips
+
+### Fast Iteration
+
+For development, use debug builds for faster compilation:
+
+```bash
+cargo run  # Server or client
+```
+
+### Hot Reload
+
+The server supports hot-reload for quest files in debug mode. Edit TOML files in `data/quests/` and they'll reload automatically.
+
+### Cross-Compilation
+
+For Linux → Windows builds:
+
+```bash
+rustup target add x86_64-pc-windows-gnu
+cargo build --target x86_64-pc-windows-gnu --release
+```
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Server won't start - database error">
+    Delete `game.db` and restart. The server will recreate it with the latest schema.
+  </Accordion>
+
+  <Accordion title="Client can't connect to localhost server">
+    Ensure the server is running and check `main.rs` constants:
+
+    ```rust
+    const SERVER_URL: &str = "http://localhost:2567";
+    const WS_URL: &str = "ws://localhost:2567";
+    ```
+  </Accordion>
+
+  <Accordion title="WASM build fails">
+    Ensure you have the target installed:
+
+    ```bash
+    rustup target add wasm32-unknown-unknown
+    ```
+
+    Some dependencies may not be WASM-compatible. Check conditional compilation in `lib.rs`:
+
+    ```rust
+    #[cfg(not(target_arch = "wasm32"))]
+    use native_only_crate;
+    ```
+  </Accordion>
+</AccordionGroup>

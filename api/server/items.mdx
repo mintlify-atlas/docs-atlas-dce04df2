@@ -1,0 +1,536 @@
+---
+title: 'Items'
+description: 'Item, inventory, and bank vault systems'
+---
+
+## Overview
+
+The item system handles player inventories, bank vaults, and ground items. Inventories have 20 slots with stack limits, while banks use unlimited stacking with upgradeable slot counts.
+
+## Constants
+
+```rust
+pub const GOLD_ITEM_ID: &str = "gold";
+pub const DEFAULT_MAX_STACK: i32 = 99;
+pub const INVENTORY_SIZE: usize = 20;
+pub const DEFAULT_BANK_SIZE: usize = 50;
+pub const BANK_UPGRADE_SLOTS: usize = 10;
+pub const BANK_MAX_SIZE: usize = 100;
+pub const BANK_UPGRADE_COST: i32 = 5_000;
+```
+
+## Inventory
+
+### Struct Definition
+
+```rust
+pub struct Inventory {
+    pub slots: Vec<Option<InventorySlot>>,
+    pub gold: i32,
+}
+
+pub struct InventorySlot {
+    pub item_id: String,
+    pub quantity: i32,
+}
+```
+
+### Constructor
+
+```rust
+pub fn new() -> Self
+```
+
+Creates an empty 20-slot inventory with 0 gold.
+
+### Methods
+
+#### add_item()
+
+```rust
+pub fn add_item(
+    &mut self,
+    item_id: &str,
+    quantity: i32,
+    registry: &ItemRegistry,
+) -> i32
+```
+
+Adds items to inventory with stacking. Returns quantity that couldn't fit.
+
+<ParamField path="item_id" type="&str" required>
+  Item ID to add
+</ParamField>
+
+<ParamField path="quantity" type="i32" required>
+  Quantity to add
+</ParamField>
+
+<ParamField path="registry" type="&ItemRegistry" required>
+  Item registry for looking up max_stack
+</ParamField>
+
+<ResponseField name="overflow" type="i32">
+  Quantity that couldn't fit (0 if all items added)
+</ResponseField>
+
+**Stacking Logic:**
+1. Gold always adds to `inventory.gold` counter (unlimited)
+2. For other items:
+   - First, fill existing stacks up to max_stack
+   - Then, create new slots for remaining quantity
+   - Return overflow if inventory full
+
+**Example:**
+```rust
+let mut inv = Inventory::new();
+let overflow = inv.add_item("iron_ore", 150, &registry);
+// If iron_ore max_stack = 99:
+// Slot 0: iron_ore x99
+// Slot 1: iron_ore x51
+// overflow = 0
+```
+
+#### remove_item()
+
+```rust
+pub fn remove_item(&mut self, item_id: &str, count: i32) -> bool
+```
+
+Removes items from inventory. Returns true if successful.
+
+<ParamField path="item_id" type="&str" required>
+  Item ID to remove
+</ParamField>
+
+<ParamField path="count" type="i32" required>
+  Quantity to remove
+</ParamField>
+
+<ResponseField name="success" type="bool">
+  True if inventory had enough items to remove
+</ResponseField>
+
+**Behavior:**
+- Checks if enough items exist before removing
+- Removes from multiple stacks if needed
+- Clears empty slots
+
+#### has_item()
+
+```rust
+pub fn has_item(&self, item_id: &str, count: i32) -> bool
+```
+
+Checks if inventory contains at least `count` of an item.
+
+#### count_item()
+
+```rust
+pub fn count_item(&self, item_id: &str) -> i32
+```
+
+Counts total quantity of an item across all slots.
+
+#### has_space_for()
+
+```rust
+pub fn has_space_for(
+    &self,
+    item_id: &str,
+    count: i32,
+    registry: &ItemRegistry,
+) -> bool
+```
+
+Checks if inventory has space for additional items.
+
+<ParamField path="item_id" type="&str" required>
+  Item to check space for
+</ParamField>
+
+<ParamField path="count" type="i32" required>
+  Quantity to check
+</ParamField>
+
+<ResponseField name="has_space" type="bool">
+  True if items would fit
+</ResponseField>
+
+**Algorithm:**
+1. Gold always fits (unlimited)
+2. Check space in existing stacks
+3. Check number of empty slots needed
+4. Return true if enough room
+
+#### use_item()
+
+```rust
+pub fn use_item(&mut self, slot_index: usize, registry: &ItemRegistry) -> Option<String>
+```
+
+Consumes one item from a slot. Returns item_id if successful.
+
+<ParamField path="slot_index" type="usize" required>
+  Inventory slot index (0-19)
+</ParamField>
+
+<ResponseField name="item_id" type="Option<String>">
+  Item ID that was used, or None if slot empty or item not usable
+</ResponseField>
+
+**Effects:**
+- Decrements quantity by 1
+- Clears slot if quantity reaches 0
+- Only works for items with `is_usable() = true`
+
+#### to_update()
+
+```rust
+pub fn to_update(&self) -> Vec<InventorySlotUpdate>
+```
+
+Serializes inventory for network sync.
+
+<ResponseField name="slots" type="Vec<InventorySlotUpdate>">
+  List of non-empty slots with (slot_index, item_id, quantity)
+</ResponseField>
+
+## Bank Vault
+
+### Struct Definition
+
+```rust
+pub struct Bank {
+    pub slots: Vec<Option<InventorySlot>>,
+    pub gold: i32,
+}
+```
+
+**Key Differences from Inventory:**
+- Unlimited stacking: one slot per item type, no max_stack limit
+- Upgradeable capacity: 50 slots base, can expand to 100
+- Separate gold counter
+- Shared across all characters on account (in some implementations)
+
+### Constructor
+
+```rust
+pub fn new() -> Self
+pub fn new_with_size(size: usize) -> Self
+```
+
+Creates a new bank vault.
+
+### Methods
+
+#### expand()
+
+```rust
+pub fn expand(&mut self, additional: usize)
+```
+
+Adds empty slots to the bank.
+
+<ParamField path="additional" type="usize" required>
+  Number of slots to add (typically BANK_UPGRADE_SLOTS = 10)
+</ParamField>
+
+#### add_item()
+
+```rust
+pub fn add_item(
+    &mut self,
+    item_id: &str,
+    quantity: i32,
+    _registry: &ItemRegistry,
+) -> i32
+```
+
+Adds items to bank with unlimited stacking. Returns overflow.
+
+<ParamField path="item_id" type="&str" required>
+  Item ID to add
+</ParamField>
+
+<ParamField path="quantity" type="i32" required>
+  Quantity to add
+</ParamField>
+
+<ResponseField name="overflow" type="i32">
+  Quantity that couldn't fit (only non-zero if bank full)
+</ResponseField>
+
+**Stacking Logic:**
+1. Gold goes to bank.gold counter
+2. If item already exists in a slot, add to that slot (saturating at i32::MAX)
+3. Otherwise, find first empty slot
+4. Return overflow if no empty slots
+
+**No Max Stack:**
+```rust
+// Bank can stack unlimited quantities
+bank.add_item("iron_ore", 100_000, &registry); // All in one slot
+```
+
+#### remove_item()
+
+```rust
+pub fn remove_item(&mut self, item_id: &str, count: i32) -> bool
+```
+
+Removes items from bank. Returns true if successful.
+
+#### has_item()
+
+```rust
+pub fn has_item(&self, item_id: &str, count: i32) -> bool
+```
+
+Checks if bank contains at least `count` of an item.
+
+#### has_space_for()
+
+```rust
+pub fn has_space_for(
+    &self,
+    item_id: &str,
+    _count: i32,
+    _registry: &ItemRegistry,
+) -> bool
+```
+
+Checks if bank has space for an item.
+
+<ResponseField name="has_space" type="bool">
+  True if item already exists (stacks into that slot) or there's an empty slot
+</ResponseField>
+
+**Note:** Count is ignored because banks have unlimited stacking per slot.
+
+## Ground Items
+
+### Struct Definition
+
+```rust
+pub struct GroundItem {
+    pub id: String,
+    pub item_id: String,
+    pub x: f32,
+    pub y: f32,
+    pub quantity: i32,
+    pub owner_id: Option<String>,
+    pub drop_time: u64,
+    pub instance_id: Option<String>,
+}
+```
+
+<ParamField path="owner_id" type="Option<String>">
+  Player who dropped the item. During the first 10 seconds, only the owner can pick it up.
+</ParamField>
+
+<ParamField path="drop_time" type="u64">
+  Timestamp when item was dropped (milliseconds)
+</ParamField>
+
+<ParamField path="instance_id" type="Option<String>">
+  Instance ID if item is in an instance, None for overworld
+</ParamField>
+
+### Constructor
+
+```rust
+pub fn new(
+    id: &str,
+    item_id: &str,
+    x: f32,
+    y: f32,
+    quantity: i32,
+    owner_id: Option<String>,
+    current_time: u64,
+) -> Self
+
+pub fn new_in_instance(
+    id: &str,
+    item_id: &str,
+    x: f32,
+    y: f32,
+    quantity: i32,
+    owner_id: Option<String>,
+    current_time: u64,
+    instance_id: Option<String>,
+) -> Self
+```
+
+### Methods
+
+#### is_expired()
+
+```rust
+pub fn is_expired(&self, current_time: u64) -> bool
+```
+
+Checks if the item has exceeded its 60 second lifetime.
+
+<ResponseField name="expired" type="bool">
+  True if item should despawn
+</ResponseField>
+
+**Lifetime:**
+```rust
+const ITEM_LIFETIME_MS: u64 = 60000; // 60 seconds
+```
+
+#### can_pickup()
+
+```rust
+pub fn can_pickup(&self, player_id: &str, current_time: u64) -> bool
+```
+
+Checks if a player can pick up this item.
+
+<ParamField path="player_id" type="&str" required>
+  Player attempting to pick up
+</ParamField>
+
+<ResponseField name="can_pickup" type="bool">
+  True if player is allowed to pick up this item
+</ResponseField>
+
+**Ownership Rules:**
+- **First 10 seconds:** Only owner can pick up (or anyone if no owner)
+- **After 10 seconds:** Anyone can pick up
+
+```rust
+const OWNER_PERIOD_MS: u64 = 10000;
+
+if current_time - drop_time < 10000 {
+    // Owner-only period
+    owner_id.as_ref().map_or(true, |owner| owner == player_id)
+} else {
+    // Free-for-all
+    true
+}
+```
+
+## Network Updates
+
+### InventorySlotUpdate
+
+```rust
+pub struct InventorySlotUpdate {
+    pub slot: u8,
+    pub item_id: String,
+    pub quantity: i32,
+}
+```
+
+Sent to clients to sync inventory/bank state.
+
+### GroundItemUpdate
+
+```rust
+pub struct GroundItemUpdate {
+    pub id: String,
+    pub item_id: String,
+    pub x: f32,
+    pub y: f32,
+    pub quantity: i32,
+}
+```
+
+Sent to clients to show items on the ground.
+
+## Example Usage
+
+### Inventory Operations
+
+```rust
+use item::{Inventory, INVENTORY_SIZE};
+
+let mut inv = Inventory::new();
+
+// Add items
+let overflow = inv.add_item("iron_ore", 150, &registry);
+if overflow > 0 {
+    println!("Couldn't fit {} iron ore", overflow);
+}
+
+// Add gold
+inv.add_item("gold", 1000, &registry);
+println!("Gold: {}", inv.gold);
+
+// Check for items
+if inv.has_item("iron_ore", 100) {
+    println!("You have enough iron ore!");
+}
+
+// Remove items for crafting
+if inv.remove_item("iron_ore", 50) {
+    inv.add_item("iron_bar", 25, &registry);
+}
+
+// Use a potion
+if let Some(item_id) = inv.use_item(5, &registry) {
+    println!("Used {}", item_id);
+}
+```
+
+### Bank Operations
+
+```rust
+use item::{Bank, BANK_UPGRADE_COST};
+
+let mut bank = Bank::new(); // 50 slots
+
+// Deposit massive stacks (unlimited per slot)
+bank.add_item("iron_ore", 100_000, &registry);
+bank.add_item("coal", 50_000, &registry);
+
+// Upgrade bank size
+if player.gold >= BANK_UPGRADE_COST {
+    player.gold -= BANK_UPGRADE_COST;
+    bank.expand(10); // Now 60 slots
+    bank_max_slots += 10;
+}
+
+// Withdraw items
+if bank.remove_item("iron_ore", 100) {
+    inv.add_item("iron_ore", 100, &registry);
+}
+```
+
+### Ground Item Handling
+
+```rust
+use item::GroundItem;
+
+// Drop an item
+let ground_item = GroundItem::new(
+    &format!("drop_{}", uuid::Uuid::new_v4()),
+    "iron_sword",
+    player.x as f32,
+    player.y as f32,
+    1,
+    Some(player.id.clone()),
+    current_time,
+);
+ground_items.insert(ground_item.id.clone(), ground_item);
+
+// Check pickup eligibility
+if ground_item.can_pickup(&player.id, current_time) {
+    if inv.has_space_for(&ground_item.item_id, ground_item.quantity, &registry) {
+        inv.add_item(&ground_item.item_id, ground_item.quantity, &registry);
+        ground_items.remove(&ground_item.id);
+    }
+}
+
+// Cleanup expired items
+ground_items.retain(|_, item| !item.is_expired(current_time));
+```
+
+## Related Types
+
+- [Player](/api/server/player) - Player inventory and bank
+- [GameRoom](/api/server/game-room) - Ground item management
+- [Database](/api/server/database) - Inventory persistence

@@ -1,0 +1,258 @@
+---
+title: NetworkClient
+description: WebSocket client for server communication and state synchronization
+---
+
+## Overview
+
+The `NetworkClient` handles all network communication between the client and server using WebSockets. It manages connection lifecycle, message encoding/decoding, and automatic reconnection.
+
+## NetworkClient
+
+WebSocket client with matchmaking and reconnection support.
+
+### Constructors
+
+<ParamField path="new_guest(base_url)" type="NetworkClient">
+  Create a guest client for development mode (no authentication)
+  
+  <ParamField path="base_url" type="&str" required>
+    WebSocket server URL (e.g., "ws://localhost:2567")
+  </ParamField>
+</ParamField>
+
+<ParamField path="new_authenticated(base_url, auth_token, character_id)" type="NetworkClient">
+  Create an authenticated client with a specific character
+  
+  <ParamField path="base_url" type="&str" required>
+    WebSocket server URL
+  </ParamField>
+  
+  <ParamField path="auth_token" type="&str" required>
+    JWT authentication token
+  </ParamField>
+  
+  <ParamField path="character_id" type="i64" required>
+    Character ID to join with
+  </ParamField>
+</ParamField>
+
+<ParamField path="new_spectator(base_url)" type="NetworkClient">
+  Create a spectator client (desktop only) for read-only world view
+  
+  <ParamField path="base_url" type="&str" required>
+    WebSocket server URL
+  </ParamField>
+</ParamField>
+
+### Methods
+
+<ParamField path="poll(state)">
+  Process incoming messages and update game state. Should be called every frame.
+  
+  <ParamField path="state" type="&mut GameState" required>
+    Game state to update with server messages
+  </ParamField>
+</ParamField>
+
+<ParamField path="send(message)">
+  Send a message to the server
+  
+  <ParamField path="message" type="&ClientMessage" required>
+    Message to send (Move, Chat, Attack, etc.)
+  </ParamField>
+</ParamField>
+
+<ParamField path="is_connected()" type="bool">
+  Check if currently connected to the server
+</ParamField>
+
+<ParamField path="is_spectator()" type="bool">
+  Check if in spectator mode
+</ParamField>
+
+<ParamField path="disconnect()">
+  Disconnect from the server
+</ParamField>
+
+<ParamField path="send_spectator_upgrade(session_token)">
+  Upgrade from spectator to authenticated player
+  
+  <ParamField path="session_token" type="&str" required>
+    Session token from authentication
+  </ParamField>
+</ParamField>
+
+## ClientMessage
+
+Messages sent from client to server.
+
+### Variants
+
+<ParamField path="Move" type="{ dx: f32, dy: f32, seq: u32 }">
+  Player movement input
+</ParamField>
+
+<ParamField path="Face" type="{ direction: u8 }">
+  Change facing direction (0-7)
+</ParamField>
+
+<ParamField path="Attack">
+  Attack current target
+</ParamField>
+
+<ParamField path="Chat" type="{ text: String, channel: String }">
+  Send chat message to a channel ("public" or "global")
+</ParamField>
+
+<ParamField path="Pickup" type="{ item_id: String }">
+  Pick up a ground item
+</ParamField>
+
+<ParamField path="UseItem" type="{ slot_index: u32 }">
+  Use/consume an item from inventory
+</ParamField>
+
+<ParamField path="Equip" type="{ slot_index: u8 }">
+  Equip an item from inventory
+</ParamField>
+
+<ParamField path="Unequip" type="{ slot_type: String, target_slot: Option<u8> }">
+  Unequip an item to inventory
+</ParamField>
+
+<ParamField path="DropItem" type="{ slot_index: u8, quantity: u32, target_x: Option<i32>, target_y: Option<i32> }">
+  Drop an item from inventory
+</ParamField>
+
+<ParamField path="Craft" type="{ recipe_id: String }">
+  Craft an item using a recipe
+</ParamField>
+
+<ParamField path="ShopBuy" type="{ npc_id: String, item_id: String, quantity: u32 }">
+  Buy items from a shop
+</ParamField>
+
+<ParamField path="ShopSell" type="{ npc_id: String, item_id: String, quantity: u32 }">
+  Sell items to a shop
+</ParamField>
+
+<ParamField path="BankDeposit" type="{ item_id: String, quantity: i32 }">
+  Deposit items to bank
+</ParamField>
+
+<ParamField path="BankWithdraw" type="{ item_id: String, quantity: i32 }">
+  Withdraw items from bank
+</ParamField>
+
+<ParamField path="ChopTree" type="{ tree_x: i32, tree_y: i32, tree_gid: u32 }">
+  Start chopping a tree
+</ParamField>
+
+<ParamField path="MineRock" type="{ rock_x: i32, rock_y: i32, rock_gid: u32 }">
+  Start mining a rock
+</ParamField>
+
+<ParamField path="CastSpell" type="{ spell_id: String }">
+  Cast a spell
+</ParamField>
+
+<ParamField path="TogglePrayer" type="{ prayer_id: String }">
+  Activate or deactivate a prayer
+</ParamField>
+
+<ParamField path="Ping" type="{ timestamp: f64 }">
+  Latency measurement ping
+</ParamField>
+
+## Connection Lifecycle
+
+The client manages connection through several states:
+
+1. **Disconnected** - No connection to server
+2. **Matchmaking** - Requesting room assignment via HTTP
+3. **Connecting** - Establishing WebSocket connection
+4. **Connected** - Active connection, sending/receiving messages
+
+### Reconnection
+
+The client automatically attempts to reconnect after disconnection:
+
+- Maximum 3 reconnection attempts
+- 2 second delay between attempts
+- Preserves authentication token and character ID
+- Spectator mode uses separate reconnection path
+
+## Message Processing
+
+The `poll()` method processes incoming messages in this order:
+
+1. **Pong messages** - Handled immediately for accurate latency measurement
+2. **State sync messages** - Batched and processed in tick order (max 4 per frame)
+3. **Other messages** - Processed immediately
+
+State sync messages older than the current server tick are discarded to prevent stale updates.
+
+## Example Usage
+
+```rust
+use aeven_client::network::{NetworkClient, ClientMessage};
+
+// Create authenticated client
+let mut client = NetworkClient::new_authenticated(
+    "ws://localhost:2567",
+    "jwt_token_here",
+    12345,
+);
+
+// In main loop
+loop {
+    // Process network messages
+    client.poll(&mut game_state);
+    
+    // Check connection status
+    if client.is_connected() {
+        // Send movement
+        client.send(&ClientMessage::Move {
+            dx: 1.0,
+            dy: 0.0,
+            seq: 0,
+        });
+        
+        // Send chat
+        client.send(&ClientMessage::Chat {
+            text: "Hello world!".to_string(),
+            channel: "public".to_string(),
+        });
+    }
+}
+```
+
+## Platform Differences
+
+### WebAssembly (WASM)
+
+On WASM, matchmaking is performed by JavaScript before loading the game:
+
+```javascript
+// JavaScript matchmaking
+const response = await fetch('/matchmake/joinOrCreate/game_room', {
+    method: 'POST',
+    headers: { 'Authorization': 'Bearer ' + token },
+    body: JSON.stringify({ characterId: 12345 })
+});
+const { room, sessionToken } = await response.json();
+localStorage.setItem('roomId', room.roomId);
+localStorage.setItem('sessionToken', sessionToken);
+```
+
+The Rust client then reads these values from localStorage.
+
+### Desktop
+
+On desktop, the client performs matchmaking directly via HTTP before opening the WebSocket.
+
+## Related
+
+- [GameState](/api/client/game-state) - Game state updated by network messages
+- [InputHandler](/api/client/input) - Generates client messages from input

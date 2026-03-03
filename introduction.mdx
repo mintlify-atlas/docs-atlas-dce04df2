@@ -1,0 +1,257 @@
+---
+title: "Welcome to Aeven"
+description: "A RuneScape-inspired isometric MMORPG built entirely in Rust, featuring real-time multiplayer combat, skills, quests, and a persistent open world"
+---
+
+<img
+  className="block dark:hidden"
+  src="https://github.com/user-attachments/assets/8e0a588f-64a4-43fc-86bf-a0dfd8fbded4"
+  alt="Aeven gameplay screenshot"
+/>
+<img
+  className="hidden dark:block"
+  src="https://github.com/user-attachments/assets/8e0a588f-64a4-43fc-86bf-a0dfd8fbded4"
+  alt="Aeven gameplay screenshot"
+/>
+
+## What is Aeven?
+
+Aeven is an **isometric pixel-art MMORPG** inspired by classic RuneScape, built from the ground up in Rust. It combines nostalgic grid-based gameplay with modern web technologies, featuring real-time multiplayer action, skill progression, quests, crafting, and a dynamically streamed open world.
+
+**Play now at [aeven.xyz](https://aeven.xyz)**
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Get the game running locally in under 5 minutes
+  </Card>
+  <Card title="Architecture" icon="diagram-project" href="/development/architecture">
+    Understand the client-server design and tech stack
+  </Card>
+  <Card title="Game Features" icon="gamepad" href="/features/multiplayer">
+    Explore combat, skills, quests, and world systems
+  </Card>
+  <Card title="Map Editor" icon="map" href="/tools/map-editor">
+    Build custom maps with the React-based editor
+  </Card>
+</CardGroup>
+
+## Key Features
+
+<AccordionGroup>
+  <Accordion title="Real-Time Multiplayer" icon="users">
+    **WebSocket-based networking** with server-authoritative gameplay running at **20 Hz tick rate**. Players see each other move, fight, and interact in real-time using MessagePack protocol for efficient data transfer.
+
+    - Server validates all actions (no client-side cheating)
+    - Automatic save system every 30 seconds
+    - Session-based authentication with SQLite persistence
+  </Accordion>
+
+  <Accordion title="Combat System" icon="sword">
+    **Click-to-target combat** with melee and ranged weapons. Features hit rolls, damage calculations, health bars, and loot drops.
+
+    - 1-second attack cooldown with grid-based targeting
+    - Equipment bonuses affect combat stats
+    - NPC AI with chase, attack, and return behaviors
+    - Death and respawn mechanics with item drops
+  </Accordion>
+
+  <Accordion title="Skills & Progression" icon="chart-line">
+    **RuneScape-style XP and leveling system** with multiple skills:
+
+    - **Hitpoints** - Increases health pool
+    - **Combat** - Improves melee effectiveness
+    - **Fishing** - Gather fish from water tiles
+    - Additional skills: Mining, Woodcutting, Crafting, Prayer, and more
+
+    Visual XP drops and level-up notifications keep progression satisfying.
+  </Accordion>
+
+  <Accordion title="Quest System" icon="scroll">
+    **Lua-scripted quest system** with dialogue trees, objectives, and rewards.
+
+    - Dynamic quest state tracking
+    - Multi-step objectives (kill NPCs, gather items, talk to NPCs)
+    - Reward system with items and XP
+    - Hot-reload support for quest development
+  </Accordion>
+
+  <Accordion title="Items & Equipment" icon="backpack">
+    **20-slot inventory** with drag-and-drop management:
+
+    - Equipment system with combat bonuses
+    - Ground items with owner-only pickup windows
+    - 60-second despawn timers
+    - Stack limits and item metadata
+    - NPC shops and recipe-based crafting
+  </Accordion>
+
+  <Accordion title="Open World" icon="map">
+    **Chunk-based world streaming** for seamless exploration:
+
+    - Procedural and hand-crafted maps
+    - Tiled map editor compatibility
+    - Collision detection and pathfinding
+    - Interior instances and dungeons
+    - NPC spawners and gathering nodes
+  </Accordion>
+</AccordionGroup>
+
+## Tech Stack
+
+Aeven leverages Rust's performance and safety guarantees across the entire stack:
+
+<CodeGroup>
+```toml rust-server/Cargo.toml
+[dependencies]
+# Web framework
+axum = { version = "0.7", features = ["ws"] }
+tokio = { version = "1", features = ["full"] }
+
+# Database
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
+
+# Serialization (MessagePack)
+rmp-serde = "1.3"
+rmpv = { version = "1.3", features = ["with-serde"] }
+
+# Scripting (Lua for quests)
+mlua = { version = "0.10", features = ["lua54", "vendored", "async", "send"] }
+
+# Password hashing
+argon2 = "0.5"
+```
+
+```toml client/Cargo.toml
+[dependencies]
+# Game engine
+macroquad = { version = "0.4", features = ["audio"] }
+
+# MessagePack for Colyseus protocol
+rmp-serde = "1.3"
+rmpv = { version = "1.3", features = ["with-serde"] }
+
+# Native-only dependencies
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+ureq = { version = "2.10", features = ["json"] }
+ewebsock = { version = "0.6", features = ["tls"] }
+```
+</CodeGroup>
+
+| Component | Technology |
+|-----------|------------|
+| **Server** | Rust, Axum, Tokio, SQLite |
+| **Client** | Rust, Macroquad |
+| **Protocol** | MessagePack over WebSocket |
+| **Quest Scripting** | Lua 5.4 |
+| **Game Data** | TOML configs |
+| **Map Editor** | React + TypeScript |
+
+## Architecture Overview
+
+<Steps>
+  <Step title="Client Connects">
+    Player authenticates via REST API (`/api/login`), receives a session token
+  </Step>
+  <Step title="Matchmaking">
+    Client POSTs to `/matchmake/joinOrCreate/game_room`, gets `roomId` and `sessionId`
+  </Step>
+  <Step title="WebSocket Upgrade">
+    Client connects to `wss://host/{roomId}?sessionId=...` and receives `Welcome` message
+  </Step>
+  <Step title="Game Loop">
+    Server ticks at **20 Hz** (50ms), processing:
+    - Player movement and collision
+    - NPC AI state machines
+    - Combat damage calculations
+    - Item spawns and despawns
+    - Quest objective tracking
+  </Step>
+  <Step title="State Sync">
+    Server broadcasts `StateSync` messages to all clients with compressed player/NPC positions
+  </Step>
+</Steps>
+
+<Note>
+  The server is fully **authoritative**—clients only send input commands (move, attack, pickup) and the server validates everything. This prevents cheating but requires careful network optimization.
+</Note>
+
+## Cross-Platform Support
+
+Aeven runs natively on desktop and compiles to WebAssembly for browser play:
+
+<CodeGroup>
+```bash Desktop (Native)
+cd client
+cargo run --release
+```
+
+```bash Web (WASM)
+cd client
+rustup target add wasm32-unknown-unknown
+cargo build --target wasm32-unknown-unknown --profile release-wasm
+```
+</CodeGroup>
+
+<Warning>
+  WASM builds run in **offline demo mode** for now. Network code is conditionally compiled out on `wasm32` targets.
+</Warning>
+
+## Project Structure
+
+```plaintext
+client/          Rust game client (Macroquad)
+├── src/
+│   ├── game/        Game state, entities, tilemap
+│   ├── network/     WebSocket client, protocol encoding
+│   ├── render/      Isometric rendering, UI, animations
+│   ├── input/       Keyboard, mouse, touch handling
+│   └── auth/        Login, registration, character select
+
+rust-server/     Rust game server (Axum + WebSocket)
+├── src/
+│   ├── game.rs      GameRoom, tick loop, player/NPC logic
+│   ├── protocol.rs  MessagePack encoding/decoding
+│   ├── db.rs        SQLite persistence, auth
+│   ├── quest/       Lua quest runner and registry
+│   ├── npc.rs       NPC AI state machine
+│   └── item.rs      Inventory, ground items, drops
+├── data/            TOML config files
+│   ├── entities/    NPC definitions
+│   ├── items.toml   Item stats and metadata
+│   └── quests/      Lua quest scripts
+
+mapper/          React-based map editor
+docs/            Documentation (this site)
+```
+
+## Community & Contribution
+
+<CardGroup cols={2}>
+  <Card title="GitHub Repository" icon="github" href="https://github.com/andrewrexo/isometric-game">
+    View source code, report issues, and contribute
+  </Card>
+  <Card title="Contributing Guide" icon="code-pull-request" href="/development/building">
+    Learn how to build and contribute to Aeven
+  </Card>
+</CardGroup>
+
+<Info>
+  All rights reserved. This is a passion project and not currently open for external contributions without prior discussion.
+</Info>
+
+## What's Next?
+
+<CardGroup cols={2}>
+  <Card title="Get Started" icon="play" href="/quickstart">
+    Build and run Aeven in 5 minutes
+  </Card>
+  <Card title="Explore Features" icon="compass" href="/features/multiplayer">
+    Deep dive into game systems
+  </Card>
+  <Card title="Build a Quest" icon="wand-magic-sparkles" href="/tools/quest-scripting">
+    Write your first Lua quest script
+  </Card>
+  <Card title="API Reference" icon="code" href="/api/server/game-room">
+    Browse server and client APIs
+  </Card>
+</CardGroup>

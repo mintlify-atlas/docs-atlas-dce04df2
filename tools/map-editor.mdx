@@ -1,0 +1,390 @@
+---
+title: Map Editor
+description: React-based isometric map editor for creating and editing Aeven's world
+---
+
+The map editor is a browser-based React application for creating and editing Aeven's isometric world. It supports multi-layer tile painting, object placement, entity spawning, collision editing, and interior map design.
+
+## Features
+
+- **Multi-layer tile painting**: Ground, objects, and overhead layers
+- **Object placement**: Trees, rocks, buildings from sprite library
+- **Entity spawning**: NPCs, monsters, quest givers with configurable properties
+- **Collision editing**: Visual collision layer editing
+- **Wall placement**: Isometric wall segments for buildings
+- **Portal system**: Create portals between overworld and interior maps
+- **Gathering zones**: Define resource gathering areas
+- **Interior maps**: Separate interior building layouts
+- **Undo/redo**: Full history system
+- **Auto-save**: Automatically syncs changes to server every 30 seconds
+- **Chunk-based**: Efficient loading and editing of large worlds
+
+## Getting Started
+
+### Running Locally
+
+```bash
+cd mapper
+npm install
+npm run dev
+```
+
+The editor will start at `http://localhost:5173`.
+
+### Building for Production
+
+```bash
+npm run build
+```
+
+### Running with Docker
+
+A Dockerfile is provided for containerized deployment:
+
+```bash
+docker build -f Dockerfile.mapper -t aeven-mapper .
+docker run -p 8080:80 aeven-mapper
+```
+
+## Configuration
+
+The editor is configured via `mapper-config.json`:
+
+```json
+{
+  "tilesets": [
+    {
+      "name": "tiles",
+      "image": "/assets/sprites/tiles.png",
+      "tileWidth": 64,
+      "tileHeight": 32,
+      "columns": 32,
+      "firstGid": 1
+    }
+  ],
+  "objects": {
+    "basePath": "/assets/sprites/objects",
+    "firstGid": 1162,
+    "items": [
+      { "id": 101, "name": "101", "width": 108, "height": 161 },
+      { "id": 102, "name": "102", "width": 195, "height": 255 }
+    ]
+  },
+  "walls": {
+    "basePath": "/assets/sprites/walls",
+    "firstGid": 2500,
+    "items": [
+      { "id": 1, "name": "wall_stone_down", "width": 64, "height": 48 }
+    ]
+  }
+}
+```
+
+### Configuration Fields
+
+- **tilesets**: Array of tileset definitions for ground/object/overhead layers
+  - `name`: Tileset identifier
+  - `image`: Path to tileset image
+  - `tileWidth`/`tileHeight`: Tile dimensions in isometric space
+  - `columns`: Number of tiles per row
+  - `firstGid`: Starting global tile ID
+
+- **objects**: Sprite objects (trees, rocks, buildings)
+  - `basePath`: Directory containing object sprites
+  - `firstGid`: Starting global ID for objects
+  - `items`: Array of object definitions with ID, name, width, height
+
+- **walls**: Wall segments for buildings
+  - Same structure as objects
+
+## Tools
+
+The editor provides multiple tools accessible via keyboard shortcuts:
+
+### Tile Tools
+
+- **Paint (B)**: Paint tiles on the active layer
+- **Fill (G)**: Flood-fill contiguous tiles
+- **Magic Wand (W)**: Select all tiles of the same type
+- **Eraser (E)**: Remove tiles
+- **Eyedropper (I)**: Sample tile from canvas
+
+### Object Tools
+
+- **Object (O)**: Place objects from the object palette
+- **Wall Down (D)**: Place downward-facing wall segments
+- **Wall Right (R)**: Place right-facing wall segments
+
+### Entity Tools
+
+- **Entity (N)**: Place NPCs, monsters, quest givers
+- **Portal (P)**: Create portals to interior maps or other locations
+- **Gathering Zone (F)**: Define resource gathering areas
+
+### Other Tools
+
+- **Select (V)**: Select and move objects/entities
+- **Collision (C)**: Toggle collision on tiles
+
+### Interior-Only Tools
+
+When editing interior maps:
+
+- **Spawn Point (S)**: Define named entry points
+- **Exit Portal (X)**: Create exits back to overworld
+
+## Keyboard Shortcuts
+
+```
+V - Select tool
+B - Paint brush
+G - Fill tool
+W - Magic wand
+E - Eraser
+C - Collision toggle
+N - Entity placement
+O - Object placement
+P - Portal tool
+F - Gathering zone
+D - Wall down
+R - Wall right
+S - Spawn point (interiors)
+X - Exit portal (interiors)
+I - Eyedropper
+
+Ctrl/Cmd + Z - Undo
+Ctrl/Cmd + Shift + Z - Redo
+Ctrl/Cmd + Y - Redo
+Esc - Clear selection
+```
+
+## Layer System
+
+Maps use a three-layer rendering system:
+
+1. **Ground Layer**: Base terrain (grass, dirt, stone)
+2. **Objects Layer**: Mid-level decorations and walkable objects
+3. **Overhead Layer**: Trees, roofs, anything that renders above the player
+
+Switch layers using the Layer Panel on the left sidebar.
+
+## Chunk System
+
+The world is divided into 32×32 tile chunks. The editor:
+
+- Loads chunks on demand as you pan the viewport
+- Auto-creates empty chunks when you paint outside existing bounds
+- Saves only modified (dirty) chunks
+- Displays chunk boundaries when enabled (toggle in View menu)
+
+## Entity Placement
+
+Place NPCs, monsters, and quest givers using the Entity tool (N):
+
+1. Select an entity from the Entity Panel
+2. Click the Entity tool or press N
+3. Click on the map to place
+4. Select placed entities to edit properties in the Properties Panel
+
+### Entity Properties
+
+- **Entity ID**: Type of entity (from entity registry)
+- **Name**: Display name (optional override)
+- **Level**: Monster level or NPC tier
+- **Position**: World coordinates (X, Y)
+
+## Map Objects
+
+Objects are decorative sprites like trees, rocks, and buildings:
+
+1. Select an object from the Object Palette
+2. Click the Object tool or press O
+3. Click on the map to place
+4. Objects automatically set collision on their tile
+
+### Object Properties
+
+- **GID**: Global sprite ID
+- **Width/Height**: Sprite dimensions
+- **No Collision**: Check to make object walkable
+
+## Interior Maps
+
+Create separate interior building layouts:
+
+### Creating an Interior
+
+1. Open the Menu Bar → File → New Interior
+2. Enter an interior ID and name
+3. Set dimensions (width × height in tiles)
+4. Click Create
+
+### Connecting to Overworld
+
+1. In the overworld, place a Portal (P tool)
+2. Set Target Map to the interior ID
+3. Set Target Spawn to the spawn point name
+4. In the interior, place an Exit Portal (X tool)
+5. Set its target back to "overworld"
+
+### Spawn Points
+
+Interiors can have multiple named spawn points:
+
+1. Use the Spawn Point tool (S)
+2. Click on a tile to place
+3. Name the spawn point (e.g., "entrance", "upstairs")
+4. Reference this name in portal Target Spawn fields
+
+## Saving and Loading
+
+### Auto-Save
+
+The editor auto-saves dirty chunks every 30 seconds to the backend server (if connected).
+
+### Manual Save
+
+Use Menu Bar → File → Save All to force an immediate save.
+
+### Export
+
+Menu Bar → File → Export allows exporting chunks as JSON files.
+
+### Server Connection
+
+The editor attempts to connect to a backend server for persistence:
+
+- **Connected**: Green indicator in bottom-right
+- **Disconnected**: Falls back to IndexedDB (browser storage)
+
+Configure the server URL in `mapper/server/index.ts`.
+
+## Storage System
+
+The editor uses a hybrid storage approach:
+
+1. **Primary**: Remote server via HTTP API
+2. **Fallback**: Browser IndexedDB for offline editing
+
+Chunks are stored in JSON format:
+
+```json
+{
+  "coord": { "cx": 0, "cy": 0 },
+  "width": 32,
+  "height": 32,
+  "layers": {
+    "ground": [1, 1, 1, ...],
+    "objects": [0, 0, 15, ...],
+    "overhead": [0, 0, 0, ...]
+  },
+  "collision": "base64-encoded-bitset",
+  "entities": [...],
+  "mapObjects": [...],
+  "walls": [...],
+  "portals": [...],
+  "gatheringZones": [...]
+}
+```
+
+## Architecture
+
+The editor is built with:
+
+- **React 19**: UI framework
+- **TypeScript**: Type safety
+- **Zustand**: State management
+- **Vite**: Build tool and dev server
+
+### Key Components
+
+- **Canvas** (`src/components/Canvas`): Main isometric rendering view
+- **TilePalette** (`src/components/TilePalette`): Tileset selector
+- **ObjectPalette** (`src/components/ObjectPalette`): Object/wall selector
+- **EntityPanel** (`src/components/EntityPanel`): Entity list
+- **PropertiesPanel** (`src/components/PropertiesPanel`): Selected item properties
+- **LayerPanel** (`src/components/LayerPanel`): Layer visibility controls
+
+### Core Systems
+
+- **IsometricRenderer** (`src/core/IsometricRenderer.ts`): Renders isometric tiles and objects
+- **ChunkManager** (`src/core/ChunkManager.ts`): Manages chunk loading/unloading
+- **Storage** (`src/core/Storage.ts`): Handles persistence
+- **History** (`src/core/History.ts`): Undo/redo system
+- **TilesetLoader** (`src/core/TilesetLoader.ts`): Loads tileset images
+- **EntityRegistry** (`src/core/EntityRegistry.ts`): Loads entity definitions from TOML
+
+## Troubleshooting
+
+### Can't see my changes
+
+Check that:
+- Correct layer is active and visible
+- You're painting on the right chunk
+- Zoom level is appropriate
+- Layer visibility is enabled (eye icon in Layer Panel)
+
+### Objects not appearing
+
+Verify:
+- Object sprites are in the configured `basePath`
+- Sprite filenames match object IDs (e.g., `101.png`)
+- `mapper-config.json` has correct object definitions
+
+### Auto-save not working
+
+Check:
+- Server connection status (bottom-right indicator)
+- Browser console for errors
+- Server is running and accessible
+- CORS is configured if running on different origin
+
+### Performance issues
+
+Large maps can impact performance:
+- Reduce visible area by zooming in
+- Close unused sidebars
+- Clear browser cache
+- Use chunk-based editing (work on smaller areas)
+
+## Development
+
+### Project Structure
+
+```
+mapper/
+├── src/
+│   ├── components/     # React components
+│   ├── core/           # Core systems (rendering, storage)
+│   ├── state/          # Zustand store
+│   ├── types/          # TypeScript types
+│   ├── App.tsx         # Main app component
+│   └── main.tsx        # Entry point
+├── public/
+│   ├── assets/         # Sprites and tilesets
+│   └── maps/           # Chunk JSON files
+├── server/             # Optional backend server
+├── package.json
+└── vite.config.ts
+```
+
+### Adding New Tools
+
+1. Define tool enum in `src/types/index.ts`
+2. Add tool logic to `src/components/Canvas/index.tsx`
+3. Add toolbar button in `src/components/Toolbar/index.tsx`
+4. Add keyboard shortcut in `src/App.tsx`
+
+### Adding New Entity Types
+
+Add entity definitions to TOML files in `/entities/`:
+
+```toml
+[[entities]]
+id = "my_npc"
+name = "My NPC"
+type = "questGiver"
+sprite_id = 42
+```
+
+The EntityRegistry will automatically load and display them in the Entity Panel.

@@ -1,0 +1,567 @@
+---
+title: 'Client Architecture'
+description: 'Client-side structure and rendering'
+---
+
+The Aeven client is built with Macroquad and handles rendering, input, and network communication.
+
+## Client Structure
+
+The client is organized into modules:
+
+```
+client/src/
+├── main.rs              # Entry point, game loop, auth flow
+├── game/
+│   ├── state.rs         # GameState (players, npcs, inventory)
+│   ├── entities.rs      # Player struct
+│   ├── npc.rs           # Npc struct
+│   ├── item.rs          # GroundItem, Inventory
+│   ├── chunk.rs         # ChunkManager
+│   ├── tilemap.rs       # Tilemap rendering
+│   └── tutorial.rs      # Tutorial system
+├── network/
+│   ├── mod.rs           # NetworkClient
+│   └── protocol.rs      # MessagePack encoding/decoding
+├── input/
+│   ├── handler.rs       # InputHandler, command generation
+│   └── touch.rs         # Touch/mobile controls
+├── render/
+│   ├── mod.rs           # Renderer
+│   ├── isometric.rs     # Isometric transforms
+│   ├── animation.rs     # Animation state machine
+│   └── sprites.rs       # Sprite atlas management
+├── ui/
+│   ├── screens.rs       # Login, character select
+│   └── hud.rs           # In-game UI (inventory, chat, etc.)
+├── audio/
+│   └── mod.rs           # AudioManager (music, SFX)
+└── auth/
+    └── client.rs        # Auth API client
+```
+
+## Main Loop
+
+The client runs a single-threaded game loop with Macroquad:
+
+```rust
+#[macroquad::main(window_conf)]
+async fn main() {
+    let mut game_state = GameState::new();
+    let mut network = NetworkClient::new_authenticated(...);
+    let mut input_handler = InputHandler::new();
+    let renderer = Renderer::new(&mut audio).await;
+
+    loop {
+        run_game_frame(&mut game_state, &mut network, &mut input_handler, &renderer, &mut audio);
+        next_frame().await;
+    }
+}
+```
+
+### Game Frame (`run_game_frame`)
+
+Each frame follows this sequence:
+
+```rust
+fn run_game_frame(
+    game_state: &mut GameState,
+    network: &mut NetworkClient,
+    input_handler: &mut InputHandler,
+    renderer: &Renderer,
+    audio: &mut AudioManager,
+) {
+    // 1. Poll network messages (non-blocking)
+    network.poll(game_state);
+
+    // 2. Play queued sound effects
+    for sfx in game_state.pending_sfx.drain(..) {
+        audio.play_sfx(&sfx);
+    }
+
+    // 3. Render and get UI layout
+    let (layout, timings) = renderer.render(game_state);
+
+    // 4. Handle input with UI hit detection
+    let commands = input_handler.process(game_state, &layout, audio);
+
+    // 5. Send input commands to server
+    for cmd in commands {
+        let msg = input_to_message(cmd);
+        network.send(&msg);
+    }
+}
+```
+
+## GameState
+
+The `GameState` struct holds the client's view of the world:
+
+```rust
+pub struct GameState {
+    // Entity state (synced from server)
+    pub players: HashMap<String, Player>,
+    pub npcs: HashMap<String, Npc>,
+    pub ground_items: HashMap<String, GroundItem>,
+
+    // Local player reference
+    pub local_player_id: Option<String>,
+
+    // Inventory (server-authoritative)
+    pub inventory: Inventory,
+    pub gold: i32,
+
+    // World data
+    pub chunk_manager: ChunkManager,
+    pub current_map_type: String,  // "world" or "interior"
+    pub instance_id: String,
+
+    // UI state
+    pub ui_state: UiState,
+    pub active_dialogue: Option<ActiveDialogue>,
+    pub active_shop: Option<ShopData>,
+
+    // Visual effects
+    pub damage_numbers: Vec<DamageNumber>,
+    pub xp_globes: XpGlobesManager,
+    pub area_banner: Option<AreaBanner>,
+
+    // Camera
+    pub camera: Camera,
+
+    // Registries (received from server on connect)
+    pub entity_registry: HashMap<String, EntityDef>,
+    pub item_registry: ItemRegistry,
+    pub recipe_registry: HashMap<String, RecipeDefinition>,
+
+    // Tutorial (for new characters)
+    pub tutorial: Option<TutorialManager>,
+
+    // Performance tracking
+    pub frame_timings: FrameTimings,
+}
+```
+
+### State Updates
+
+The server sends a `StateSync` message every 50ms:
+
+```rust
+ServerMessage::StateSync { tick, players, npcs, instance_id } => {
+    // Discard stale syncs from previous map context
+    if instance_id != game_state.instance_id {
+        return;
+    }
+
+    // Update player positions/HP
+    for update in players {
+        if let Some(player) = game_state.players.get_mut(&update.id) {
+            player.x = update.x;
+            player.y = update.y;
+            player.hp = update.hp;
+            // visual_x/visual_y interpolate to x/y in render
+        }
+    }
+
+    // Update NPCs
+    for update in npcs {
+        // Similar to players
+    }
+}
+```
+
+## Networking
+
+The `NetworkClient` handles WebSocket communication:
+
+```rust
+pub struct NetworkClient {
+    ws: Option<WebSocket>,
+    room_id: Option<String>,
+    connected: bool,
+}
+
+impl NetworkClient {
+    pub fn new_authenticated(ws_url: &str, token: &str, character_id: i64) -> Self {
+        // 1. HTTP matchmake to get session token
+        let session_token = Self::matchmake(ws_url, token, character_id);
+
+        // 2. Connect WebSocket with session token
+        let ws_url = format!("{}?sessionToken={}", ws_url, session_token);
+        let ws = WebSocket::connect(&ws_url);
+
+        Self { ws: Some(ws), connected: true, .. }
+    }
+
+    pub fn poll(&mut self, game_state: &mut GameState) {
+        let Some(ws) = &mut self.ws else { return };
+
+        // Receive all pending messages
+        while let Some(msg) = ws.try_recv() {
+            let bytes = msg.as_bytes();
+            let decompressed = maybe_decompress(bytes);
+            let decoded = decode_message(&decompressed);
+
+            // Dispatch to handlers
+            self.handle_message(decoded, game_state);
+        }
+    }
+
+    pub fn send(&mut self, msg: &ClientMessage) {
+        let bytes = encode_message(msg.type_name(), msg);
+        self.ws.send(&bytes);
+    }
+}
+```
+
+### Message Handlers
+
+Incoming messages mutate `GameState`:
+
+```rust
+fn handle_message(&mut self, msg: DecodedMessage, state: &mut GameState) {
+    match msg {
+        DecodedMessage::RoomData { msg_type, data } => {
+            match msg_type.as_str() {
+                "welcome" => {
+                    let player_id = extract_string(&data, "player_id");
+                    state.local_player_id = Some(player_id);
+                }
+                "playerJoined" => {
+                    let player = Player::from_message(&data);
+                    state.players.insert(player.id.clone(), player);
+                }
+                "damageEvent" => {
+                    // Spawn damage number visual
+                    state.damage_numbers.push(DamageNumber::new(...));
+                    state.pending_sfx.push("hit".to_string());
+                }
+                "inventoryUpdate" => {
+                    // Replace entire inventory (server-authoritative)
+                    state.inventory = Inventory::from_message(&data);
+                }
+                // ... 100+ message types
+            }
+        }
+    }
+}
+```
+
+## Rendering
+
+The `Renderer` handles all drawing:
+
+```rust
+pub struct Renderer {
+    font: Font,
+    player_sprites: HashMap<String, Texture2D>,
+    equipment_sprites: HashMap<String, Texture2D>,
+    object_sprites: HashMap<String, Texture2D>,
+}
+
+impl Renderer {
+    pub fn render(&self, state: &GameState) -> (UiLayout, RenderTimings) {
+        // 1. Draw ground tiles
+        self.render_ground(state);
+
+        // 2. Depth-sort and draw entities
+        self.render_entities(state);
+
+        // 3. Draw overhead objects (roofs, trees)
+        self.render_overhead(state);
+
+        // 4. Draw UI (inventory, chat, HUD)
+        let layout = self.render_ui(state);
+
+        // 5. Draw visual effects (damage numbers, particles)
+        self.render_effects(state);
+
+        (layout, timings)
+    }
+}
+```
+
+### Isometric Projection
+
+Aeven uses a 64×32 diamond tile projection:
+
+```rust
+const TILE_WIDTH: f32 = 64.0;
+const TILE_HEIGHT: f32 = 32.0;
+
+pub fn world_to_screen(x: f32, y: f32, camera: &Camera) -> (f32, f32) {
+    let iso_x = (x - y) * TILE_WIDTH / 2.0;
+    let iso_y = (x + y) * TILE_HEIGHT / 2.0;
+
+    let screen_x = iso_x - camera.x + screen_width() / 2.0;
+    let screen_y = iso_y - camera.y + screen_height() / 2.0;
+
+    (screen_x, screen_y)
+}
+
+pub fn screen_to_world(screen_x: f32, screen_y: f32, camera: &Camera) -> (f32, f32) {
+    let world_x = (screen_x + camera.x - screen_width() / 2.0) / (TILE_WIDTH / 2.0);
+    let world_y = (screen_y + camera.y - screen_height() / 2.0) / (TILE_HEIGHT / 2.0);
+
+    let tile_x = (world_x + world_y) / 2.0;
+    let tile_y = (world_y - world_x) / 2.0;
+
+    (tile_x, tile_y)
+}
+```
+
+### Depth Sorting
+
+Entities are sorted by `y + z` to determine draw order:
+
+```rust
+let mut entities: Vec<_> = state.players.values()
+    .chain(state.npcs.values())
+    .collect();
+
+entities.sort_by(|a, b| {
+    let a_depth = a.y as f32 + a.z;
+    let b_depth = b.y as f32 + b.z;
+    a_depth.partial_cmp(&b_depth).unwrap()
+});
+
+for entity in entities {
+    self.draw_entity(entity);
+}
+```
+
+### Interpolation
+
+To smooth 20 Hz server updates into 60 FPS visuals:
+
+```rust
+impl Player {
+    pub fn update(&mut self, delta: f32) {
+        // Lerp visual position toward authoritative server position
+        let lerp_speed = 0.3;  // Adjust for smoothness vs responsiveness
+        self.visual_x += (self.x as f32 - self.visual_x) * lerp_speed * delta * 60.0;
+        self.visual_y += (self.y as f32 - self.visual_y) * lerp_speed * delta * 60.0;
+    }
+}
+```
+
+## Input Handling
+
+The `InputHandler` converts keyboard/mouse input into `InputCommand`s:
+
+```rust
+pub enum InputCommand {
+    Move { dx: f32, dy: f32 },
+    Attack,
+    Target { entity_id: String },
+    Chat { text: String, channel: String },
+    Pickup { item_id: String },
+    UseItem { slot_index: usize },
+    // ... 50+ command types
+}
+
+impl InputHandler {
+    pub fn process(
+        &mut self,
+        state: &GameState,
+        layout: &UiLayout,
+        audio: &AudioManager,
+    ) -> Vec<InputCommand> {
+        let mut commands = Vec::new();
+
+        // Movement (WASD or arrow keys)
+        let (dx, dy) = self.get_movement_input(state);
+        if dx != 0.0 || dy != 0.0 {
+            commands.push(InputCommand::Move { dx, dy });
+        }
+
+        // Attack (Space or Ctrl)
+        if self.is_attack_pressed(state) {
+            commands.push(InputCommand::Attack);
+        }
+
+        // Mouse clicks (UI or world)
+        if is_mouse_button_pressed(MouseButton::Left) {
+            let (mx, my) = mouse_position();
+            if let Some(cmd) = self.handle_click(mx, my, state, layout) {
+                commands.push(cmd);
+            }
+        }
+
+        commands
+    }
+}
+```
+
+### Control Schemes
+
+Aeven supports two control schemes:
+
+**Modern** (default):
+- WASD: Move
+- Space: Attack
+- Enter: Open chat
+- Esc: Close UI
+
+**Classic** (RuneScape-style):
+- Arrow keys: Move
+- Ctrl: Attack
+- Chat always open (type to chat)
+- Esc: Close UI
+
+## Chunk Management
+
+The `ChunkManager` handles world streaming:
+
+```rust
+pub struct ChunkManager {
+    chunks: HashMap<ChunkCoord, Chunk>,
+    requested: HashSet<ChunkCoord>,
+}
+
+impl ChunkManager {
+    pub fn update_player_position(&mut self, x: f32, y: f32) -> Vec<ChunkCoord> {
+        let current_chunk = ChunkCoord::from_world(x, y);
+
+        // Request 3×3 grid around player
+        let mut to_request = Vec::new();
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                let coord = ChunkCoord { x: current_chunk.x + dx, y: current_chunk.y + dy };
+                if !self.chunks.contains_key(&coord) && !self.requested.contains(&coord) {
+                    to_request.push(coord);
+                    self.requested.insert(coord);
+                }
+            }
+        }
+
+        to_request
+    }
+
+    pub fn unload_distant_chunks(&mut self) {
+        // Remove chunks more than 5 chunks away from player
+        self.chunks.retain(|coord, _| {
+            coord.distance_to(current_chunk) <= 5
+        });
+    }
+}
+```
+
+## Platform Differences
+
+### Native vs WASM
+
+The client uses conditional compilation for platform-specific code:
+
+```rust
+// Native-only: Auth flow
+#[cfg(not(target_arch = "wasm32"))]
+use auth::AuthSession;
+
+// WASM-only: LocalStorage for session
+#[cfg(target_arch = "wasm32")]
+fn get_session_token() -> Option<String> {
+    web_sys::window()?
+        .local_storage().ok()??
+        .get_item("sessionToken").ok()?
+}
+```
+
+### Mobile Support
+
+The client includes touch controls for mobile:
+
+```rust
+#[cfg(target_os = "android")]
+if let Some(touch) = get_last_touch_position() {
+    // Virtual joystick or tap-to-move
+    let cmd = handle_touch(touch.x, touch.y, state);
+    commands.push(cmd);
+}
+```
+
+## Audio
+
+The `AudioManager` handles music and SFX:
+
+```rust
+pub struct AudioManager {
+    current_music: Option<String>,
+    music_volume: f32,
+    sfx_volume: f32,
+    muted: bool,
+}
+
+impl AudioManager {
+    pub async fn play_music(&mut self, path: &str) {
+        if self.current_music.as_deref() == Some(path) {
+            return;  // Already playing
+        }
+
+        stop_sound(&self.current_music_sound);
+        let sound = load_sound(path).await.unwrap();
+        play_sound(&sound, PlaySoundParams {
+            looped: true,
+            volume: self.music_volume,
+        });
+        self.current_music = Some(path.to_string());
+    }
+
+    pub fn play_sfx(&self, name: &str) {
+        if self.muted { return; }
+
+        let sound = self.sfx_cache.get(name)?;
+        play_sound(sound, PlaySoundParams {
+            looped: false,
+            volume: self.sfx_volume,
+        });
+    }
+}
+```
+
+## Performance Optimization
+
+### Culling
+
+Only render entities within screen bounds:
+
+```rust
+let screen_bounds = camera.screen_bounds();
+for player in state.players.values() {
+    let (sx, sy) = world_to_screen(player.x, player.y, &camera);
+    if screen_bounds.contains(sx, sy) {
+        self.draw_player(player);
+    }
+}
+```
+
+### Sprite Batching
+
+Group draws by texture to reduce draw calls:
+
+```rust
+let mut batches: HashMap<Texture2D, Vec<DrawCall>> = HashMap::new();
+
+for entity in entities {
+    let texture = self.get_texture(&entity.sprite);
+    batches.entry(texture).or_default().push(DrawCall { ... });
+}
+
+for (texture, calls) in batches {
+    draw_texture_batched(&texture, &calls);
+}
+```
+
+### Frame Limiting
+
+Optional FPS cap to reduce power usage:
+
+```rust
+if let Some(cap) = state.frame_timings.fps_cap {
+    let target_frame_time = Duration::from_secs_f64(1.0 / cap as f64);
+    let elapsed = frame_start.elapsed();
+    if elapsed < target_frame_time {
+        std::thread::sleep(target_frame_time - elapsed);
+    }
+}
+```

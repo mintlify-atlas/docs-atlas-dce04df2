@@ -1,0 +1,312 @@
+---
+title: 'GameRoom'
+description: 'Core server game loop and player management'
+---
+
+## Overview
+
+The `GameRoom` struct is the central server-side game engine that manages all game state, player sessions, NPCs, world data, and the main tick loop. It runs at 20 ticks per second and handles movement, combat, crafting, quests, and all game systems.
+
+## Struct Definition
+
+```rust
+pub struct GameRoom {
+    pub id: String,
+    pub name: String,
+    players: RwLock<HashMap<String, Player>>,
+    npcs: RwLock<HashMap<String, Npc>>,
+    ground_items: RwLock<HashMap<String, GroundItem>>,
+    world: Arc<World>,
+    entity_registry: Arc<EntityRegistry>,
+    quest_registry: Arc<QuestRegistry>,
+    crafting_registry: Arc<CraftingRegistry>,
+    item_registry: Arc<ItemRegistry>,
+    prayer_registry: Arc<PrayerRegistry>,
+    shop_registry: RwLock<ShopRegistry>,
+    tick: RwLock<u64>,
+    // ... many more fields for game systems
+}
+```
+
+### Key Fields
+
+<ParamField path="id" type="String">
+  Unique identifier for this game room instance
+</ParamField>
+
+<ParamField path="name" type="String">
+  Display name of the game room
+</ParamField>
+
+<ParamField path="players" type="RwLock<HashMap<String, Player>>">
+  All connected players indexed by player ID
+</ParamField>
+
+<ParamField path="npcs" type="RwLock<HashMap<String, Npc>>">
+  All NPCs spawned in the world indexed by NPC ID
+</ParamField>
+
+<ParamField path="ground_items" type="RwLock<HashMap<String, GroundItem>>">
+  Items dropped on the ground indexed by item ID
+</ParamField>
+
+<ParamField path="world" type="Arc<World>">
+  Tile map data, collision detection, and chunk loading system
+</ParamField>
+
+<ParamField path="tick" type="RwLock<u64>">
+  Current server tick counter (increments at 20 Hz)
+</ParamField>
+
+## Constants
+
+```rust
+const TICK_RATE: f32 = 20.0;                     // 20 ticks per second
+const MOVE_COOLDOWN_TICKS: u64 = 5;              // 5 ticks between moves (250ms)
+const ATTACK_COOLDOWN_MS: u64 = 700;             // Melee attack cooldown
+const RANGED_ATTACK_COOLDOWN_MS: u64 = 1000;     // Ranged attack cooldown
+const PLAYER_HP_REGEN_PERCENT: f32 = 2.0;        // 2% HP regen per interval
+const REGEN_INTERVAL_MS: u64 = 15000;            // Regen every 15 seconds
+const VIEW_DISTANCE: i32 = 40;                   // Player view distance in tiles
+```
+
+## Methods
+
+### Constructor
+
+```rust
+pub async fn new(
+    name: &str,
+    entity_registry: Arc<EntityRegistry>,
+    quest_registry: Arc<QuestRegistry>,
+    crafting_registry: Arc<CraftingRegistry>,
+    item_registry: Arc<ItemRegistry>,
+    prayer_registry: Arc<PrayerRegistry>,
+    player_instances: Arc<RwLock<HashMap<String, String>>>,
+    instance_manager: Arc<InstanceManager>,
+    db: Option<Arc<Database>>,
+    interior_registry: Arc<InteriorRegistry>,
+    chest_registry: Arc<ChestRegistry>,
+) -> Self
+```
+
+Creates a new GameRoom instance.
+
+<ParamField path="name" type="&str" required>
+  Name of the game room
+</ParamField>
+
+<ParamField path="entity_registry" type="Arc<EntityRegistry>" required>
+  Registry containing all NPC entity definitions
+</ParamField>
+
+<ParamField path="quest_registry" type="Arc<QuestRegistry>" required>
+  Registry containing all quest definitions
+</ParamField>
+
+<ParamField path="db" type="Option<Arc<Database>>">
+  Optional database connection for persistence
+</ParamField>
+
+**Implementation Details:**
+- Loads the world map from `maps/world_0`
+- Preloads chunks around spawn point (radius: 3 chunks)
+- Spawns all NPCs from chunk entity_spawns
+- Initializes all game systems (gathering, woodcutting, mining, farming)
+- Restores saved farming patches and plot unlocks from database
+- Caches portal tile positions for NPC pathfinding
+
+### Main Tick Loop
+
+```rust
+pub async fn tick(&self)
+```
+
+Runs the main game loop logic for one tick (called at 20 Hz).
+
+**Processing Order:**
+1. Movement tick - process pending player movements
+2. Auto-action tick - handle OSRS-style click-to-act (attack/mine/chop)
+3. NPC AI tick - update NPC state machines and attacks
+4. Combat tick - resolve player attacks on NPCs/players
+5. Resource gathering tick - fishing, woodcutting, mining
+6. Crafting tick - check for completed timed crafts
+7. HP/MP/Prayer regeneration
+8. Quest objective updates
+9. Farming crop growth
+10. Shop restocking
+11. Buff expiration
+12. Ground item cleanup
+13. State synchronization broadcast to clients
+
+### Player Management
+
+```rust
+pub async fn add_player(&self, player: Player)
+```
+
+Adds a player to the game room.
+
+<ParamField path="player" type="Player" required>
+  The player entity to add
+</ParamField>
+
+**Effects:**
+- Adds player to the players HashMap
+- Updates player_chunks tracking
+- Initializes delta sync state for bandwidth optimization
+- Player becomes visible to other players in view distance
+
+---
+
+```rust
+pub async fn remove_player(&self, player_id: &str)
+```
+
+Removes a player from the game room.
+
+<ParamField path="player_id" type="&str" required>
+  ID of the player to remove
+</ParamField>
+
+**Effects:**
+- Removes player from players HashMap
+- Frees their chair if sitting
+- Clears any active trades
+- Removes from player_chunks tracking
+- Other players no longer see this player
+
+### Player Spawning
+
+```rust
+pub async fn respawn_player(&self, player_id: &str)
+```
+
+Respawns a dead player at the world spawn point.
+
+<ParamField path="player_id" type="&str" required>
+  ID of the player to respawn
+</ParamField>
+
+**Effects:**
+- Resets player position to `(WORLD_SPAWN_X, WORLD_SPAWN_Y)` = (15, 4)
+- Restores HP, prayer points, and mana to maximum
+- Clears auto-action and target
+- Frees occupied chair if any
+- Resets movement cooldown
+
+### State Synchronization
+
+```rust
+pub async fn broadcast_state_sync(&self, full_sync: bool)
+```
+
+Broadcasts game state updates to all connected clients.
+
+<ParamField path="full_sync" type="bool" required>
+  If true, sends full state. If false, sends delta updates for bandwidth optimization.
+</ParamField>
+
+**StateSync Message Contents:**
+- All players in view distance (VIEW_DISTANCE = 40 tiles)
+- All NPCs in view distance
+- All ground items in view distance
+- Current server tick
+- Instance-specific data if player is in an instance
+
+**Optimization:**
+- Delta sync sends only changed entities every tick
+- Full sync forced every 20 ticks (1 second) to prevent desync
+- Per-player culling based on Chebyshev distance
+
+## Player State Machine
+
+```rust
+pub enum AutoActionType {
+    Attack,
+    Mine,
+    Chop,
+}
+
+pub struct AutoAction {
+    pub target: AutoActionTarget,
+    pub action: AutoActionType,
+    pub started_at: u64,
+}
+```
+
+Players can have one active auto-action that repeats every tick when conditions are met:
+- **Attack**: Auto-attack NPC or player when in range and cooldown ready
+- **Mine**: Auto-mine ore when in range and cooldown ready
+- **Chop**: Auto-chop tree when in range and cooldown ready
+
+## Trade System
+
+```rust
+const TRADE_MAX_DISTANCE: i32 = 3;
+
+pub struct TradeSession {
+    pub player_a: String,
+    pub player_b: String,
+    pub offer_a: TradeOffer,
+    pub offer_b: TradeOffer,
+}
+
+pub struct TradeOffer {
+    pub items: Vec<TradeOfferEntry>,
+    pub gold: i32,
+    pub accepted: bool,
+}
+```
+
+Two-party secure trading with acceptance confirmation:
+- Both players must be within 3 tiles
+- Both players must accept before trade executes
+- Inventory space validated before execution
+
+## Example Usage
+
+```rust
+use std::sync::Arc;
+
+// Create game room
+let game_room = GameRoom::new(
+    "main",
+    entity_registry,
+    quest_registry,
+    crafting_registry,
+    item_registry,
+    prayer_registry,
+    player_instances,
+    instance_manager,
+    Some(db),
+    interior_registry,
+    chest_registry,
+).await;
+
+// Add player
+let player = Player::new(
+    "player_123",
+    "Steve",
+    15,
+    4,
+    "male",
+    "tan",
+    Some(2),
+    Some(4),
+);
+game_room.add_player(player).await;
+
+// Main game loop
+loop {
+    game_room.tick().await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await; // 20 Hz
+}
+```
+
+## Related Types
+
+- [Player](/api/server/player) - Player entity state
+- [NPC](/api/server/npc) - NPC entity and AI
+- [Items](/api/server/items) - Inventory and ground items
+- [Database](/api/server/database) - Persistence layer
