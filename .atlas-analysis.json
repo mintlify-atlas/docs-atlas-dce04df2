@@ -1,0 +1,109 @@
+{
+  "projectType": "general",
+  "projectName": "Aeven",
+  "projectDescription": "An isometric pixel-art MMORPG with multiplayer combat, skills, quests, and crafting built in Rust.",
+  "theme": "aspen",
+  "primaryColor": "#d97706",
+  "lightColor": "#fbbf24",
+  "darkColor": "#92400e",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart"
+            ]
+          },
+          {
+            "group": "Game Features",
+            "pages": [
+              "features/multiplayer",
+              "features/combat",
+              "features/skills",
+              "features/quests",
+              "features/items",
+              "features/world"
+            ]
+          },
+          {
+            "group": "Development",
+            "pages": [
+              "development/building",
+              "development/architecture",
+              "development/client",
+              "development/server",
+              "development/protocol"
+            ]
+          },
+          {
+            "group": "Tools",
+            "pages": [
+              "tools/map-editor",
+              "tools/launcher",
+              "tools/quest-scripting"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Server",
+            "pages": [
+              "api/server/game-room",
+              "api/server/player",
+              "api/server/npc",
+              "api/server/items",
+              "api/server/database"
+            ]
+          },
+          {
+            "group": "Client",
+            "pages": [
+              "api/client/game-state",
+              "api/client/network",
+              "api/client/rendering",
+              "api/client/input"
+            ]
+          },
+          {
+            "group": "Protocol",
+            "pages": [
+              "api/protocol/messages",
+              "api/protocol/websocket"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Real-time multiplayer with WebSocket networking at 20 Hz tick rate",
+    "Grid-based isometric movement with smooth visual interpolation",
+    "Server-authoritative combat with melee and ranged attacks",
+    "RuneScape-style XP and leveling system",
+    "Lua-scripted quest system with dialogue and objectives",
+    "Inventory management with equipment and combat bonuses",
+    "NPC AI with state machine behaviors (idle, chase, attack)",
+    "Chunk-based world streaming with Tiled map editor support",
+    "Cross-platform support (native desktop and WASM)"
+  ],
+  "publicApiSurface": [
+    "GameRoom::tick - Main game loop executing at 20 Hz",
+    "GameRoom::handle_move - Server-side movement validation",
+    "GameRoom::handle_attack - Combat resolution and damage calculation",
+    "NetworkClient - Client-side WebSocket connection manager",
+    "protocol::encode_server_message - MessagePack encoding for server messages",
+    "protocol::decode_client_message - MessagePack decoding for client input",
+    "NpcAI::update - NPC behavior state machine",
+    "Inventory - Item management and equipment system",
+    "QuestRegistry - Lua quest script loader and executor",
+    "Database::save_player - Player data persistence",
+    "Renderer::draw_isometric - Isometric rendering with depth sorting"
+  ]
+}
